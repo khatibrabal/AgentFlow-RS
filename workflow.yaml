@@ -1,0 +1,32 @@
+# workflow.yaml
+nodes:
+  # 1. 模拟口语化提问
+  - id: "UserInput"
+    node_type: "Text"
+    text: "帮我查一下，用联邦图学习怎么解决数据孤岛？特别是跟零信任架构结合的最新的国外论文或方案。"
+
+  # 2. 一体化智能搜索节点
+  - id: "AgentSearch"
+    node_type: "WebSearch"
+    num_results: 3
+
+  # 4. 最终分析师：大模型充当“报告撰写者”
+  - id: "FinalAnalyst"
+    node_type: "DeepSeek"
+    prompt: "
+      你是一个高级隐私计算与软件安全专家。
+      
+      【严格约束】
+      1. 你必须、且只能根据下面提供的《搜索结果》来撰写这篇分析报告！
+      2. 绝对不允许编造数据、年份或使用你自带的陈旧知识库盲答。
+      3. 必须在报告中分析联邦图学习（Federated Graph Learning）如何解决数据孤岛问题。
+      4. 必须重点突出“零信任架构（Zero Trust）”在其中的作用。
+      5. 报告中的每一个关键技术论点，都必须在句尾标注其来源的网址链接（直接照抄搜索结果中的网址即可）。
+      
+      请基于以上约束，输出一篇结构清晰、带有 Markdown 标题的专业中文学术战报。"
+
+edges:
+  - from: "UserInput"
+    to: "AgentSearch"
+  - from: "AgentSearch"
+    to: "FinalAnalyst"

@@ -1,0 +1,69 @@
+[package]
+name = "agent_flow_rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 异步运行时（核心）
+tokio = { version = "1.37", features = ["full"] }
+# 错误处理（优雅处理各种失败）
+anyhow = "1.0"
+thiserror = "1.0"
+# 用于异步 Trait（Rust 目前的推荐做法）
+async-trait = "0.1"
+# 终端 UI（后面阶段才用）
+ratatui = "0.26"
+crossterm = "0.27"
+# HTTP 请求（用于调 LLM API）
+reqwest = { version = "0.13.4", features = ["json"] }
+serde_json = "1.0.150"
+# 序列化库 serde 以及 yaml 解析器 serde_yaml
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9"
+# 用于自动加载 .env 配置文件
+dotenvy = "0.15"
+# 用于强大的命令行参数解析
+clap = { version = "4.5", features = ["derive"] }
+# 用于生成专业的本地日志时间戳
+chrono = "0.4"
+# 用于强大的正则表达式解析
+regex = "1.10"
+# 用于真正的 HTML DOM 解析与 CSS 选择器
+scraper = "0.19"
+readability = "0.3.0"
+url = "2.5.8"
+unicode-width = "0.2.2"
+# PDF 文本解析引擎
+pdf-extract = "0.7"
+# 本地文本向量化模型（基于 ONNX 的纯 Rust 实现，无需外挂服务）
+fastembed = { version = "5", features = ["ort-download-binaries-rustls-tls"] }
+# Word (.docx) 提取
+dotext = "0.1"
+# 图像 OCR (光学字符识别) Tesseract OCR 的 Rust 绑定
+rusty-tesseract = "1.1"
+image = "0.24" # 用于加载本地图像给 OCR 使用
+gag = "1.0.0"
+# 用于构建高性能的 RESTful Web 服务
+axum = "0.7"
+tower-http = { version = "0.7.0", features = ["cors"] }
+# Rust 强大的图形渲染库
+eframe = "0.29.1"
+egui = "0.29.1"
+egui_node_graph2 = "0.7.0"
+# Whisper C++ 的 Rust 高级安全绑定 (FFI 调用的典范)
+# whisper-rs = "0.11.1"
+# 纯 Rust 实现的音频 WAV 解析器
+hound = "3.5.1"
+
+# ✨ 针对开发环境的全局优化
+[profile.dev]
+# 仅生成行号调试信息，大幅减小 PDB 字典体积，解决链接器 LIMIT 报错
+debug = 1
+
+# ✨ 针对所有第三方依赖包的极其激进的优化
+[profile.dev.package."*"]
+# 剥离第三方库的调试信息（我们不需要调试别人的代码）
+debug = 0
+# 让第三方库以 Release 级别的最高性能编译！
+# 这会让你的 Agent 推理和向量计算速度极快，即使在开发模式下也不会卡顿
+opt-level = 3
