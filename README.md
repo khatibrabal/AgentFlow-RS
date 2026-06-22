@@ -55,14 +55,14 @@ EXA_API_KEY=sk-xxxxxx
 
 本项目完全依托 Cargo 进行自动化依赖下载与构建。
 
-### 3.1 克隆代码并进入目录：
+### 3.1 克隆代码并进入目录
 
 ```bash
 git clone <your_repository_url>
 cd agent_flow_rs
 ```
 
-### 3.2 下载依赖模型
+### 3.2 下载与配置依赖模型
 
 请前往 [Releases 页面](https://github.com/khatibrabal/AgentFlow-RS/releases) 下载 `models.zip` 模型压缩包，解压后将其放入项目根目录中。
 
