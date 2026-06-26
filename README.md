@@ -170,7 +170,7 @@ cargo run -- --config my_flow.yaml --export-mermaid flow_diagram
 
 本系统贯彻“配置即代码 (Configuration as Code)”原则。工作流由 `nodes` (节点定义) 与 `edges` (数据流向) 两部分构成。
 
-**基础编排示例 (`workflow.yaml`):**
+- **基础编排示例 (`workflow.yaml`):**
 
 ```yaml
 nodes:
