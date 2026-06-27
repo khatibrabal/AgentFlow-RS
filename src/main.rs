@@ -191,8 +191,8 @@ async fn main() -> anyhow::Result<()> {
     let mut node_configs_map = std::collections::HashMap::new();
 
     // 递归解析 YAML 语法树节点映射体系。
-    if let Ok(value) = parsed_yaml {
-        if let Some(nodes) = value.get("nodes").and_then(|n| n.as_sequence()) {
+    if let Ok(value) = parsed_yaml
+        && let Some(nodes) = value.get("nodes").and_then(|n| n.as_sequence()) {
             for node in nodes {
                 if let Some(id) = node.get("id").and_then(|i| i.as_str()) {
                     let mut yaml_str = serde_yaml::to_string(node).unwrap_or_default();
@@ -203,7 +203,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-    }
 
     // 初始化 TUI 全局状态机。
     let mut app_state = AppState::new(topology_order, &run_timestamp, node_configs_map);
