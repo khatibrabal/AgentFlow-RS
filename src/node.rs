@@ -1,3 +1,9 @@
+//! # 工作流计算节点核心模块 (Workflow Nodes)
+//!
+//! 本模块定义了工作流引擎中所有计算节点的核心契约（`ExecutableNode`）及其具体实现。
+//! 包含文件 I/O、大模型调用、多模态解析、网络爬虫、向量检索等各类具体节点。
+//! 所有节点均需实现基于有向无环图（DAG）的数据流转接口，以支持底层调度器的并发编排。
+
 // src/node.rs
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -20,23 +26,41 @@ use url::Url;
 
 /// 所有工作流计算节点必须实现的泛型契约接口。
 ///
-/// 继承了 `Send + Sync` 以保证其能在多核异步调度器 (`tokio::spawn`)
-/// 的线程边界之间安全传递和共享。所有的计算、网络请求和 IO 操作均在此执行。
+/// 继承了 `Send + Sync` 约束，以保证节点实例能够在多核异步调度器 (`tokio::spawn`)
+/// 的线程边界之间安全传递和共享。所有的计算、网络请求和 I/O 操作均在此执行。
 #[async_trait]
 pub trait ExecutableNode: Send + Sync {
-    /// 获取该节点在 DAG 图中的全局唯一 ID。
+    /// 获取该节点在 DAG 图中的全局唯一标识符 (ID)。
     fn id(&self) -> &str;
-    /// 获取该节点的人类可读展示名称（推荐包含 Emoji 以适配 TUI 渲染）。
+
+    /// 获取该节点的人类可读展示名称。
+    /// 主要用于 TUI 渲染或日志打印输出。
     fn name(&self) -> &str;
+
     /// 触发节点的实际运算逻辑。
     ///
     /// # Arguments
-    /// * `input` - 由底层调度器自动组装的上游依赖数据总和（文本流）
-    /// * `debug` - 是否开启底层调试模式，开启后将执行明细写入日志文件
+    ///
+    /// * `input` - 由底层调度器自动组装的上游依赖数据总和（纯文本流）。
+    /// * `debug` - 是否开启底层调试模式。开启后，节点将执行明细写入日志文件。
+    /// * `timestamp` - 当前工作流执行的全局时间戳，用于日志归档和文件命名约束。
+    ///
+    /// # Errors
+    ///
+    /// 当节点内部发生 I/O 错误、网络请求失败或参数解析异常时，返回 `anyhow::Error`。
     async fn execute(&self, input: &str, debug: bool, timestamp: &str) -> Result<String>;
 
-    /// ✨ 核心升级：带有实时日志推流能力的执行接口
-    /// 默认实现会自动降级调用老版的 execute，这样你就不需要去修改另外那十几个普通节点！
+    /// 带有实时日志推流能力的执行接口。
+    ///
+    /// 默认实现会自动降级调用基础的 `execute` 方法。对于需要向前端实时反馈
+    /// 长时运算（如 ReAct Agent 思考过程）的节点，需重写此方法。
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - 上游依赖数据。
+    /// * `debug` - 调试模式标志。
+    /// * `timestamp` - 运行时时间戳。
+    /// * `_log_tx` - 用于向外实时推送执行日志的 MPSC 异步通道发送端。
     async fn execute_with_stream(
         &self,
         input: &str,
@@ -48,12 +72,13 @@ pub trait ExecutableNode: Send + Sync {
     }
 }
 
-/// 负责从本地文件系统加载纯文本数据的 IO 节点。
+/// 负责从本地文件系统加载纯文本数据的 I/O 节点。
 ///
 /// 此节点通常作为工作流的起点（入度为 0），用于将本地知识库、
 /// 配置文件或长文本数据注入到 DAG 数据流中。
 ///
-/// # Example
+/// # Examples
+///
 /// ```yaml
 /// - id: "LoadConfig"
 ///   node_type: "FileRead"
@@ -79,12 +104,13 @@ impl ExecutableNode for FileReadNode {
     }
 }
 
-/// 负责将 DAG 数据流持久化到本地文件系统的 IO 节点。
+/// 负责将 DAG 数据流持久化到本地文件系统的 I/O 节点。
 ///
 /// 此节点通常作为工作流的终点（出度为 0），用于保存大模型生成的报告、
 /// 爬虫抓取的数据或系统执行的最终状态。
 ///
-/// # Example
+/// # Examples
+///
 /// ```yaml
 /// - id: "SaveReport"
 ///   node_type: "FileWrite"
@@ -105,7 +131,7 @@ impl ExecutableNode for FileWriteNode {
     }
 
     async fn execute(&self, input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
-        // ✨ 智能重命名逻辑：解析用户的文件名并插入时间戳
+        // 智能重命名逻辑：解析用户的文件名并插入时间戳
         let path = Path::new(&self.original_path);
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
         let ext = path.extension().unwrap_or_default().to_string_lossy();
@@ -129,12 +155,13 @@ impl ExecutableNode for FileWriteNode {
     }
 }
 
-/// 基于 DeepSeek V4 架构的智能 Agent 分析中枢。
+/// 基于 DeepSeek 架构的智能 Agent 分析中枢。
 ///
-/// 作为 Agentic RAG 的核心推理单元，负责接收系统注入的 Prompt
-/// 以及检索节点提供的海量上游参考资料，进行深度逻辑融合与产出。
+/// 作为 Agentic RAG 的核心推理单元，负责接收系统预设的 Prompt
+/// 以及检索节点提供的上游参考资料，进行深度逻辑推演与内容生成。
 ///
-/// # Example
+/// # Examples
+///
 /// ```yaml
 /// - id: "Analyst"
 ///   node_type: "DeepSeek"
@@ -219,10 +246,11 @@ impl ExecutableNode for DeepSeekNode {
 
 /// 基于正则表达式的高性能文本清洗节点。
 ///
-/// 利用 `regex` 库提取上游乱码文本中的关键信息。
-/// 必须包含至少一个捕获组 `()`，提取出的内容将作为输出向下游传递。
+/// 利用 `regex` 库提取上游非结构化文本中的关键信息。
+/// 模式字符串必须包含至少一个捕获组 `()`，提取出的内容将作为输出向下游传递。
 ///
-/// # Example
+/// # Examples
+///
 /// ```yaml
 /// - id: "ExtractEmail"
 ///   node_type: "RegexMatch"
@@ -257,12 +285,13 @@ impl ExecutableNode for RegexMatchNode {
     }
 }
 
-/// 危险但强大的底层系统命令执行节点。
+/// 底层系统命令执行节点。
 ///
-/// 独立配置要执行的命令字符串，忽略上游输入。
+/// 独立配置要执行的命令字符串，默认忽略上游输入。若自身配置为空，则将上游输入作为命令。
 /// 跨平台支持：Windows 自动路由至 `cmd`，Unix 系统路由至 `sh`。
 ///
-/// # Example
+/// # Examples
+///
 /// ```yaml
 /// - id: "RunScript"
 ///   node_type: "Shell"
@@ -270,7 +299,8 @@ impl ExecutableNode for RegexMatchNode {
 /// ```
 pub struct ShellNode {
     pub id: String,
-    pub command: String, // ✨ 新增：节点自带的命令参数
+    /// 节点预设的终端命令。若为空，将从输入流中获取命令。
+    pub command: String,
 }
 
 #[async_trait]
@@ -294,11 +324,11 @@ impl ExecutableNode for ShellNode {
             "-c"
         };
 
-        // ✨ 微调：如果自身 command 为空，就把大模型传入的 input 当作命令！
-        let target_cmd = if self.command.trim().is_empty() {
-            input.trim()
+        // 如果自身 command 为空，就把大模型传入的 input 当作命令！
+        let mut target_cmd = if self.command.trim().is_empty() {
+            input.trim().to_string()
         } else {
-            &self.command
+            self.command.clone()
         };
 
         if target_cmd.is_empty() {
@@ -307,7 +337,7 @@ impl ExecutableNode for ShellNode {
 
         let output = std::process::Command::new(shell)
             .arg(arg)
-            .arg(target_cmd) // ✨ 核心修改：执行自身配置的命令，而不是上游传入的 input
+            .arg(&target_cmd)
             .output()
             .context("Shell 命令启动失败")?;
 
@@ -326,12 +356,13 @@ impl ExecutableNode for ShellNode {
     }
 }
 
-/// 并发多线程异步爬虫
+/// 并发多线程异步网页爬虫节点。
 ///
-/// 利用 `tokio::task::JoinSet` 构建微型无栈协程池，突破 I/O 阻塞瓶颈。
-/// 核心内置了 Mozilla `readability` 算法引擎，实现免规则的工业级 DOM 清洗与无用节点剔除。
+/// 利用 `tokio::task::JoinSet` 构建微型无栈协程池，突破网络 I/O 阻塞瓶颈。
+/// 内置 Mozilla `readability` 算法引擎，实现免规则的工业级 DOM 清洗与无用节点剔除。
 ///
-/// # Example
+/// # Examples
+///
 /// ```yaml
 /// - id: "CrawlNews"
 ///   node_type: "Spider"
@@ -440,7 +471,7 @@ impl ExecutableNode for SpiderNode {
         }
         crawl_logs.push_str("\n========================\n\n");
 
-        // 3. 多线程并发抓取 (✨ 核心升级：传入索引 i)
+        // 多线程并发抓取
         let mut join_set = JoinSet::new();
         for (i, url) in target_urls.into_iter().enumerate() {
             let client_clone = client.clone();
@@ -452,7 +483,7 @@ impl ExecutableNode for SpiderNode {
             });
         }
 
-        // 4. 收集并发抓取的结果 (✨ 核心升级：先收集到数组里，不要直接拼字符串)
+        // 收集并发抓取的结果
         let mut parsed_articles: Vec<(usize, String)> = Vec::new();
         let mut success_count = 0;
 
@@ -494,7 +525,7 @@ impl ExecutableNode for SpiderNode {
             anyhow::bail!("抓取了链接，但提取正文失败。目标网页可能存在强烈的反爬虫拦截。");
         }
 
-        // 🌟 按照索引 i 进行升序排序
+        // 按照索引 i 进行升序排序
         parsed_articles.sort_by_key(|a| a.0);
 
         // 排序完成后，把所有文章的文本提取出来，合并成最终的大字符串
@@ -510,11 +541,12 @@ impl ExecutableNode for SpiderNode {
     }
 }
 
-/// 纯文本注入节点，用于模拟用户输入或常量定义。
+/// 纯文本注入节点，用于模拟用户直接输入或注入常量数据。
 ///
-/// 忽略一切上游输入，绝对忠诚地向下游输出配置好的静态字符串。
+/// 此节点将忽略一切上游输入，严格向下游输出其配置的静态字符串。
 ///
-/// # Example
+/// # Examples
+///
 /// ```yaml
 /// - id: "UserPrompt"
 ///   node_type: "Text"
@@ -541,11 +573,11 @@ impl ExecutableNode for TextNode {
 
 /// 神经网络语义搜索引擎中枢 (接入 Exa AI)。
 ///
-/// 完全超越了传统 TF-IDF 关键字匹配的限制。支持基于意图的高维张量检索。
-/// 内置了 Agentic 的自我反思能力：若用户未指定搜索词，它将调用
-/// 前置的大模型将模糊意图动态翻译为专业的特征检索 Query。
+/// 支持基于意图的高维张量检索。内置了 Agentic 的自我反思能力：若用户未指定搜索词，
+/// 节点将自动调用预置大模型（如 DeepSeek-R1/V4）将模糊的自然语言意图翻译为专业的英文检索 Query。
 ///
-/// # Example
+/// # Examples
+///
 /// ```yaml
 /// - id: "WebSearcher"
 ///   node_type: "WebSearch"
@@ -568,7 +600,7 @@ impl ExecutableNode for WebSearchNode {
     }
 
     async fn execute(&self, input: &str, debug: bool, timestamp: &str) -> Result<String> {
-        // 1. 安全读取双 API Key
+        // 安全读取双 API Key
         let exa_api_key =
             std::env::var("EXA_API_KEY").unwrap_or_else(|_| "sk-your-exa-api-key-here".to_string());
         let ds_api_key = std::env::var("DEEPSEEK_API_KEY")
@@ -580,7 +612,7 @@ impl ExecutableNode for WebSearchNode {
 
         let client = reqwest::Client::new();
 
-        // 🧠 阶段一：大模型思考阶段 (Query Generation)
+        // 阶段一：大模型思考阶段 (Query Generation)
         let search_query = if let Some(q) = &self.query {
             q.clone()
         } else if self.raw_mode {
@@ -621,7 +653,13 @@ impl ExecutableNode for WebSearchNode {
                 .await
                 .context("在生成搜索词时，DeepSeek 网络请求失败")?;
 
+            let status = ds_response.status();
             let raw_ds_text = ds_response.text().await.unwrap_or_default();
+
+            if !status.is_success() {
+                anyhow::bail!("生成搜索词失败，DeepSeek API 拒绝请求: HTTP {} - {}", status, raw_ds_text);
+            }
+
             let ds_json: serde_json::Value =
                 serde_json::from_str(&raw_ds_text).context("解析 DeepSeek 响应失败")?;
 
@@ -638,7 +676,7 @@ impl ExecutableNode for WebSearchNode {
             generated_query
         };
 
-        // 🌐 阶段二：全网检索阶段 (Exa Search)
+        // 阶段二：全网检索阶段 (Exa Search)
         let exa_payload = serde_json::json!({
             "query": search_query,
             "type": "auto",
@@ -698,7 +736,7 @@ impl ExecutableNode for WebSearchNode {
             ));
         }
 
-        // 📝 阶段三：组装高维战报
+        // 阶段三：组装高维战报
         let mut combined_report = format!(
             "\n🌐 [搜索节点] 当前使用的检索关键词: `{}`\n🔍 共为您检索到 {} 条高价值情报：\n\n",
             search_query,
@@ -731,10 +769,10 @@ impl ExecutableNode for WebSearchNode {
     }
 }
 
-/// 多模态文件解析节点
+/// 多模态文件解析节点。
 ///
-/// 能够智能识别文件后缀，自动调用对应的底层解析引擎 (PDF提取、Word解析、OCR识别)，
-/// 将多模态文件统一降维成大模型可读的纯文本流。
+/// 能够智能识别文件后缀扩展名，自动调用对应的底层解析引擎（PDF 提取、Word 解析、图片 OCR、音频 Whisper 识别），
+/// 将多模态非结构化文件统一降维成大语言模型可读的标准纯文本流。
 pub struct MultiModalParseNode {
     pub id: String,
     pub file_path: String,
@@ -743,9 +781,7 @@ pub struct MultiModalParseNode {
 impl MultiModalParseNode {
     /// 专用的 PDF 解析子程序
     fn parse_pdf(path: &Path) -> Result<String> {
-        // ✨ 核心防御机制：为系统标准输出和标准错误戴上“口罩”。
-        // 在这两个变量离开作用域（Drop）之前，第三方库的所有 println! 和 eprintln!
-        // 都会被强行导入黑洞，绝不让它们撕裂我们的 TUI 界面！
+        // 核心防御机制：使用 gag 拦截系统标准输出和错误，防止 C 库日志污染 TUI 界面
         let _gag_out = gag::Gag::stdout().ok();
 
         let content = pdf_extract::extract_text(path)?;
@@ -764,7 +800,6 @@ impl MultiModalParseNode {
 
     /// 专用的图像 OCR 解析子程序 (处理 PNG/JPG 等)
     fn parse_image(path: &Path) -> Result<String> {
-        // ✨ 极客升级：优先尝试调用本地免安装版的 Tesseract (与 Whisper 解耦方案完全一致！)
         let local_exe = if cfg!(target_os = "windows") {
             "models/tesseract/tesseract.exe"
         } else {
@@ -772,7 +807,7 @@ impl MultiModalParseNode {
         };
         let local_tessdata = "models/tesseract/tessdata";
 
-        // 1. 如果用户把 tesseract.exe 放到了 models 目录下，直接走底层子进程解耦模式
+        // 如果用户把 tesseract.exe 放到了 models 目录下，直接走底层子进程解耦模式
         if Path::new(local_exe).exists() {
             let mut cmd = std::process::Command::new(local_exe);
             cmd.arg(path.to_str().unwrap())
@@ -813,7 +848,7 @@ impl MultiModalParseNode {
         Ok(content)
     }
 
-    /// 🌟 专用的本地音频 AI 推理子程序 (子进程解耦版)
+    /// 专用的本地音频 AI 推理子程序 (基于 Whisper C++ 的子进程解耦实现)
     fn parse_audio(path: &Path) -> Result<String> {
         // 1. 检查必备的本地文件
         let model_path = "models/ggml-base.bin";
@@ -829,7 +864,7 @@ impl MultiModalParseNode {
             );
         }
 
-        // ✨ 优先寻找本地免安装版的 FFmpeg
+        // 优先寻找本地免安装版的 FFmpeg
         let local_ffmpeg = if cfg!(target_os = "windows") {
             "models/ffmpeg.exe"
         } else {
@@ -842,7 +877,7 @@ impl MultiModalParseNode {
             "ffmpeg" // 智能降级：如果本地没带，尝试调用系统全局环境变量里的 ffmpeg
         };
 
-        // 2. 利用 FFmpeg 将输入音频重采样为 16kHz WAV
+        // 利用 FFmpeg 将输入音频重采样为 16kHz WAV
         let temp_wav = format!("outputs/temp_{}.wav", Local::now().format("%H%M%S"));
         fs::create_dir_all("outputs").ok();
 
@@ -868,8 +903,7 @@ impl MultiModalParseNode {
             anyhow::bail!("音频预处理重采样失败！");
         }
 
-        // 3. 🚀 核心魔法：使用 Rust 的 Command 唤起本地 C++ 编译好的 exe！
-        // 命令行等价于: whisper.exe -m ggml-base.bin -f temp.wav -nt
+        // 利用 FFmpeg 将输入音频重采样为 16kHz WAV (Whisper 要求的标准输入格式)
         let output = std::process::Command::new(whisper_exe)
             .args([
                 "-m", model_path, // 指定模型
@@ -880,10 +914,10 @@ impl MultiModalParseNode {
             .output()
             .context("启动 whisper.exe 子进程失败！")?;
 
-        // 4. 清理临时 WAV 文件
+        // 清理临时 WAV 文件
         let _ = fs::remove_file(&temp_wav);
 
-        // 5. 捕获子进程的输出
+        // 捕获子进程的输出
         if output.status.success() {
             // whisper.cpp 默认把识别的文字输出在 stdout
             let text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -906,7 +940,6 @@ impl ExecutableNode for MultiModalParseNode {
     }
 
     async fn execute(&self, input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
-        // ✨ 微调：如果配置的文件路径为空，就尝试去读取大模型传进来的 input 路径
         let target_path = if self.file_path.trim().is_empty() {
             input.trim()
         } else {
@@ -924,7 +957,7 @@ impl ExecutableNode for MultiModalParseNode {
             .unwrap_or("")
             .to_lowercase();
 
-        // ✨ 核心路由：增加音频后缀的支持！
+        // 依据文件扩展名进行解析器路由映射
         let content = match ext.as_str() {
             "pdf" => Self::parse_pdf(path).context("PDF 解析分支崩溃")?,
             "docx" => Self::parse_docx(path).context("Word 解析分支崩溃")?,
@@ -953,10 +986,10 @@ impl ExecutableNode for MultiModalParseNode {
     }
 }
 
-/// 本地内存级向量检索引擎 (Local RAG)
+/// 本地内存级向量检索引擎 (Local RAG)。
 ///
-/// 接收上游极其冗长的文本（如整篇 PDF），在内存中对其进行滑窗分块 (Chunking)，
-/// 使用 fastembed 提取多维特征张量，最后利用余弦相似度算法召回与 Query 最匹配的片段。
+/// 接收上游冗长文本，在内存中对其进行滑窗分块 (Chunking)。使用 `fastembed` 库加载本地
+/// 模型提取多维特征张量，最后利用余弦相似度算法召回与 Query 最匹配的片段块 (Top-K)。
 pub struct LocalVectorSearchNode {
     pub id: String,
     pub query: String,
@@ -977,7 +1010,7 @@ impl ExecutableNode for LocalVectorSearchNode {
             anyhow::bail!("上游节点没有传来任何文本，无法进行向量检索。");
         }
 
-        // 1. 文本滑窗分块 (Chunking) - 每块大约 500 个字符
+        // 文本滑窗分块 (Chunking) - 每块大约 500 个字符
         let chunk_size = 500;
         let chunks: Vec<String> = input
             .chars()
@@ -986,12 +1019,7 @@ impl ExecutableNode for LocalVectorSearchNode {
             .map(|c| c.iter().collect::<String>())
             .collect();
 
-        // 2. 初始化本地嵌入模型 (FastEmbed v5 的新版 Builder 语法)
-        // let mut model = TextEmbedding::try_new(
-        //     InitOptions::new(EmbeddingModel::BGEBaseENV15).with_show_download_progress(true),
-        // )
-        // .context("初始化本地 Embedding 模型失败")?;
-
+        // 初始化本地 Embedding 模型并挂载至 models 缓存目录
         let cache_dir = std::path::PathBuf::from("models");
 
         let mut model = TextEmbedding::try_new(
@@ -1001,19 +1029,19 @@ impl ExecutableNode for LocalVectorSearchNode {
         )
             .context("初始化本地 Embedding 模型失败（请确认模型文件已正确放置在 models 目录下）")?;
 
-        // 3. 将所有文档块转化为特征向量
+        // 将所有文档块转化为特征向量
         let document_embeddings = model
             .embed(chunks.clone(), None)
             .context("文档块向量化计算失败")?;
 
-        // 4. 将用户的查询词转化为特征向量
+        // 将用户的查询词转化为特征向量
         let query_embedding = model
             .embed(vec![self.query.clone()], None)
             .context("Query 向量化计算失败")?
             .pop()
             .unwrap();
 
-        // 5. Rust 余弦相似度计算 (Cosine Similarity)
+        // Rust 余弦相似度计算 (Cosine Similarity)
         let mut scored_chunks: Vec<(usize, f32)> = document_embeddings
             .iter()
             .enumerate()
@@ -1034,10 +1062,10 @@ impl ExecutableNode for LocalVectorSearchNode {
             })
             .collect();
 
-        // 6. 按相似度从高到低降序排列
+        // 按相似度从高到低降序排列
         scored_chunks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        // 7. 提取 Top K 作为高维上下文 (将 rank 改为 _rank)
+        // 提取 Top K 作为高维上下文 (将 rank 改为 _rank)
         let mut final_context = format!("基于本地知识库，针对 `{}` 的召回结果：\n\n", self.query);
         for (idx, score) in scored_chunks.into_iter().take(self.top_k) {
             final_context.push_str(&format!(
@@ -1051,11 +1079,14 @@ impl ExecutableNode for LocalVectorSearchNode {
     }
 }
 
+/// 运行时人工审批节点。
+///
+/// 阻塞当前工作流执行器，通过监听广播通道等待前端界面的键盘输入指令（例如 TUI），
+/// 接受到授权指令方可向下推进。常用于具有破坏性的危险操作前置校验。
 pub struct ApprovalNode {
     pub id: String,
     #[allow(dead_code)]
     pub message: String,
-    // 引擎在构建时把全局广播的接收端分发给它
     pub rx: broadcast::Receiver<char>,
 }
 
@@ -1069,9 +1100,6 @@ impl ExecutableNode for ApprovalNode {
     }
 
     async fn execute(&self, _input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
-        // 1. (这里假设我们能通过某种方式发送 ExecutionEvent::RequireApproval 给 TUI)
-
-        // 2. 挂起当前的 Tokio 异步任务，死等前端的键盘广播！
         let mut rx = self.rx.resubscribe();
         loop {
             if let Ok(key) = rx.recv().await {
@@ -1104,7 +1132,6 @@ impl ExecutableNode for RouterNode {
     }
 
     async fn execute(&self, input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
-        // ✨ 根据是否包含关键字，输出供底层调度器识别的信号
         if input.contains(&self.keyword) {
             Ok("__CONDITION_TRUE__".to_string())
         } else {
@@ -1113,7 +1140,7 @@ impl ExecutableNode for RouterNode {
     }
 }
 
-/// 强制大模型输出的标准 JSON 结构
+/// 标准的 ReAct 范式请求结构，用于强约束大语言模型的 JSON 输出结构。
 #[derive(Deserialize, Debug)]
 pub struct ReActAction {
     pub thought: String,
@@ -1121,21 +1148,28 @@ pub struct ReActAction {
     pub action_input: String,
 }
 
-/// 🌟 把现有的 ExecutableNode 包装成大模型能懂的工具
+/// 工具包装器结构，用于将实现了 `ExecutableNode` 接口的底层功能件转换并注册为大模型可调用的抽象工具。
 pub struct NodeToolWrapper {
+    /// 供给大语言模型阅读的工具描述。
     pub description: String,
+    /// 实际持有的执行节点引用。
     pub node: Arc<dyn ExecutableNode>,
 }
 
-/// 真正的自主思考节点 (ReAct 范式)
+/// 具备自主思考与规划能力的 ReAct 代理节点。
+///
+/// 通过注册一系列内部工具，该节点可通过循环自问自答的模式调用其他子功能。
+/// 其执行过程被全面接入流式通道中，供监控组件实施分析。
 pub struct ReActAgentNode {
     pub id: String,
+    /// 限制最大连续思考与推导步数以防死循环。
     pub max_steps: usize,
+    /// 代理在当前上下文持有的可用工具集。
     pub registered_tools: HashMap<String, NodeToolWrapper>,
 }
 
 impl ReActAgentNode {
-    /// 自动将所有包裹好的节点，组装成给大模型看的 Prompt 说明
+    /// 根据当前节点内注册的工具生成符合 Prompt 规范的说明文档，用于指导模型工作。
     fn generate_tools_prompt(&self) -> String {
         let mut desc = String::from("你拥有的工具列表如下：\n");
         for (i, (tool_name, wrapper)) in (1..).zip(self.registered_tools.iter()) {
@@ -1147,7 +1181,7 @@ impl ReActAgentNode {
         desc
     }
 
-    /// 根据大模型的决策，动态调用内部的 ExecutableNode
+    /// 根据 LLM 决策，动态寻址并调用内部包装的底层执行节点。
     async fn execute_tool(
         &self,
         action_name: &str,
@@ -1157,7 +1191,6 @@ impl ReActAgentNode {
         log_tx: tokio::sync::mpsc::Sender<String>,
     ) -> String {
         if let Some(wrapper) = self.registered_tools.get(action_name) {
-            // ✨ 改为调用 execute_with_stream，把水管接力传给底层的 WebSearch / Spider 工具
             match wrapper
                 .node
                 .execute_with_stream(action_input, debug, timestamp, log_tx)
@@ -1184,12 +1217,10 @@ impl ExecutableNode for ReActAgentNode {
         "🤖 ReAct 自主代理"
     }
 
-    // 屏蔽掉老接口
     async fn execute(&self, _input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
         anyhow::bail!("ReActAgentNode 现在必须通过 execute_with_stream 动态调度");
     }
 
-    // ✨ 启用全新的推流接口
     async fn execute_with_stream(
         &self,
         input: &str,
@@ -1223,7 +1254,6 @@ impl ExecutableNode for ReActAgentNode {
 
         let mut final_answer = String::new();
 
-        // 🚀 实弹发射：直接推流给前端，不再攒着！
         let _ = log_tx
             .send("=== 🤖 ReAct Agent 开始思考 ===".to_string())
             .await;
@@ -1272,7 +1302,6 @@ impl ExecutableNode for ReActAgentNode {
                 }
             };
 
-            // 🚀 实弹发射：每一轮的思考痕迹实时推流
             let _ = log_tx
                 .send(format!("🧠 思考: {}", action_req.thought))
                 .await;
@@ -1289,7 +1318,6 @@ impl ExecutableNode for ReActAgentNode {
                 break;
             }
 
-            // 执行下级工具，记得把水管 log_tx.clone() 一起塞给它！
             let observation = self
                 .execute_tool(
                     &action_req.action,
@@ -1318,12 +1346,12 @@ impl ExecutableNode for ReActAgentNode {
             );
         }
 
-        // 🎯 核心护城河：函数返回值 ONLY 暴露 final_answer，绝对阻断搜索词向外泄露！
+        // 仅对外暴露 final_answer，阻断中间推演信息的越权泄漏
         Ok(final_answer)
     }
 }
 
-// 🧪 单元测试层
+// 单元测试模块
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1336,7 +1364,6 @@ mod tests {
             text: "Hello AgentFlow!".to_string(),
         };
 
-        // ✨ 修复：传入占位的时间戳参数
         let result = node
             .execute("来自上游的噪音干扰", false, "20260619_test")
             .await
@@ -1351,7 +1378,7 @@ mod tests {
             pattern: r"Email: ([a-zA-Z0-9@.]+)".to_string(),
         };
 
-        // 1. 测试能成功匹配的情况 (✨ 修复：传入时间戳)
+        // 测试成功提取命中捕获组的情况
         let valid_input = "联系人信息提取：Email: agent@rust.com 请尽快联系。";
         let valid_result = node
             .execute(valid_input, false, "20260619_test")
@@ -1359,15 +1386,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             valid_result, "agent@rust.com",
-            "正则表达式未能正确捕获捕获组(Group 1)"
+            "正则表达式未能正确提取出第一捕获组的内容"
         );
 
-        // 2. 测试匹配失败的情况（应该抛出 Err）
+        // 测试匹配失败的情况，应直接返回错误中断流程
         let invalid_input = "这里面根本没有邮箱地址。";
         let invalid_result = node.execute(invalid_input, false, "20260619_test").await;
         assert!(
             invalid_result.is_err(),
-            "正则匹配不到时应该立刻返回错误中断工作流"
+            "正则未匹配时应当返回错误"
         );
     }
 
@@ -1381,7 +1408,6 @@ mod tests {
             timestamp: test_timestamp.to_string(),
         };
 
-        // 根据 FileWriteNode 的重命名逻辑，推算出它实际写入的路径
         let expected_real_path = format!("outputs/reports/agent_test_{}.txt", test_timestamp);
 
         let read_node = FileReadNode {
@@ -1391,18 +1417,18 @@ mod tests {
 
         let mock_data = "这是一段由工作流引擎自动生成的前沿科研数据。";
 
-        // 2. 测试写入节点
+        // 测试写入节点执行行为
         let write_result = write_node.execute(mock_data, false, test_timestamp).await;
         assert!(write_result.is_ok(), "文件写入节点执行失败");
 
-        // 3. 测试读取节点
+        // 测试对应配置的读取节点能否精准加载内容
         let read_result = read_node.execute("", false, test_timestamp).await.unwrap();
         assert_eq!(
             read_result, mock_data,
-            "读取出的数据与写入的数据产生了哈希或文本损坏！"
+            "读取的数据与写入数据内容不一致"
         );
 
-        // 4. 清理案发现场（极客的修养：删除测试产生的真实文件）
+        // 清理本地生成的文件系统数据痕迹
         let cleanup_result = fs::remove_file(&expected_real_path);
         assert!(cleanup_result.is_ok(), "清理临时测试文件失败");
     }
