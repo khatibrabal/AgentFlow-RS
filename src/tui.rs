@@ -1,3 +1,9 @@
+//! # 终端用户界面模块 (TUI)
+//!
+//! 本模块基于 `ratatui` 构建，负责在终端环境中渲染交互式的有向无环图 (DAG) 工作流执行状态。
+//! 核心功能涵盖：运行时长的智能格式化、Markdown 语法的实时解析与高亮、
+//! 系统全局状态管理，以及高度定制化的控制台布局切割与重绘逻辑。
+
 // src/tui.rs
 use chrono::Local;
 use ratatui::{
@@ -15,23 +21,27 @@ use std::{
 };
 use unicode_width::UnicodeWidthStr;
 
-/// 将总秒数转换为智能的“天/时/分/秒”格式
+/// 将总秒数转换为符合人类阅读习惯的“天/时/分/秒”格式。
+///
+/// # Arguments
+///
+/// * `total_seconds` - 经过的总耗时（秒），支持浮点数以提供毫秒级的精度。
+///
+/// # Returns
+///
+/// 返回格式化后的字符串。对于秒数部分，固定保留两位小数以展示运行精度。
 fn format_duration(total_seconds: f32) -> String {
-    // 处理负数或极小的值
     if total_seconds < 0.0 {
         return "0s".to_string();
     }
 
-    // 取整进行计算，保留浮点数用于最后的秒级显示
     let total_secs_int = total_seconds as u64;
 
     let days = total_secs_int / 86400;
     let hours = (total_secs_int % 86400) / 3600;
     let minutes = (total_secs_int % 3600) / 60;
-    // 最后的秒数保留两位小数，展示运行的精确感
     let seconds = total_seconds % 60.0;
 
-    // 智能拼接字符串
     if days > 0 {
         format!("{}d {}h {}m {:.2}s", days, hours, minutes, seconds)
     } else if hours > 0 {
@@ -43,9 +53,20 @@ fn format_duration(total_seconds: f32) -> String {
     }
 }
 
-/// Markdown 语法与日志高亮解析器
+/// Markdown 语法与结构化日志解析器。
+///
+/// 将原始字符串解析为带有 `ratatui` 样式信息的 `Line` 对象，支持标题、引用、
+/// 时间戳过滤、特殊标签前缀着色以及双星号 (`**`) 的内联加粗语法。
+///
+/// # Arguments
+///
+/// * `line` - 待解析的单行纯文本字符串。
+///
+/// # Returns
+///
+/// 返回带有分段样式 (`Span`) 的 `Line` 对象，可直接交由 UI 组件进行渲染。
 fn highlight_log_line(line: &str) -> Line<'_> {
-    // 1. 解析 Markdown 标题 (### ) -> 独占一行，直接返回 (标题本身够大了，不需要内部加粗)
+    // 解析 Markdown 标题层级，独占整行并使用统一高亮
     if line.starts_with("### ") || line.starts_with("## ") || line.starts_with("# ") {
         return Line::from(Span::styled(line, Style::default().fg(Color::Cyan).bold()));
     }
@@ -53,17 +74,17 @@ fn highlight_log_line(line: &str) -> Line<'_> {
     let mut spans = Vec::new();
     let mut remaining = line;
 
-    // ✨ 核心修复 1：将 base_style 的定义提前到最上方，统管全局
+    // 提升基础样式的定义域，以实现全局基准色的统一管理
     let mut base_style = Style::default().fg(Color::White);
 
-    // ✨ 核心修复 2：解析引用区块 (> ) -> 剥离前缀，修改全局基准色，进入流水线往下走！
+    // 解析 Markdown 引用区块，剥离前缀并覆盖后续的全局基准色
     if let Some(rest) = remaining.strip_prefix("> ") {
-        base_style = Style::default().fg(Color::Rgb(171, 215, 223)).italic(); // 基准样式变为：浅蓝色 + 斜体
+        base_style = Style::default().fg(Color::Rgb(171, 215, 223)).italic();
         spans.push(Span::styled("> ", base_style));
         remaining = rest;
     }
 
-    // 3.1 时间戳提取
+    // 提取并弱化头部时间戳显示 (例如 [2026-06-19 12:00:00])
     if remaining.starts_with('[')
         && remaining.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
         && let Some(end_idx) = remaining.find(']')
@@ -77,7 +98,7 @@ fn highlight_log_line(line: &str) -> Line<'_> {
         }
     }
 
-    // 3.2 动态基准色切换
+    // 基于系统日志的特定前缀标识符进行动态的基准色路由
     if let Some(rest) = remaining.strip_prefix("▶️ ") {
         spans.push(Span::styled("▶️ ", Style::default().fg(Color::LightGreen)));
         base_style = Style::default().fg(Color::LightGreen);
@@ -151,7 +172,7 @@ fn highlight_log_line(line: &str) -> Line<'_> {
         remaining = rest;
     }
 
-    // 3.3 列表项拦截
+    // 拦截无序与有序列表项结构
     if remaining.starts_with("- ") || remaining.starts_with("* ") {
         spans.push(Span::styled(
             &remaining[..2],
@@ -184,7 +205,7 @@ fn highlight_log_line(line: &str) -> Line<'_> {
         }
     }
 
-    // 4. 终极内联加粗解析 (**关键词**)
+    // 解析内联加粗语法 (**关键词**)
     let parts: Vec<&str> = remaining.split("**").collect();
     if parts.len() > 1 {
         for (i, part) in parts.iter().enumerate() {
@@ -198,7 +219,6 @@ fn highlight_log_line(line: &str) -> Line<'_> {
                     base_style.fg(Color::LightYellow).bold(),
                 ));
             } else {
-                // 普通部分：使用动态传递下来的基准色
                 spans.push(Span::styled(*part, base_style));
             }
         }
@@ -209,44 +229,60 @@ fn highlight_log_line(line: &str) -> Line<'_> {
     Line::from(spans)
 }
 
-// 🌟 UI 状态机（封装得更加专业）
+/// TUI 客户端全局状态机。
+///
+/// 维护当前界面的选中焦点、滚动偏移量、运行监控指标以及磁盘日志文件句柄。
 pub struct AppState {
+    /// 存储所有聚合的系统全局日志。
     pub logs: Vec<String>,
+    /// 跟踪各节点的运行状态摘要。
     pub node_status: HashMap<String, String>,
-    // 存储每个节点的详细输出结果，用于点击查看
+    /// 跟踪各节点执行完毕后的输出载荷，以供选中审阅。
     pub node_results: HashMap<String, String>,
-    // 存储节点的原始 YAML 配置
+    /// 缓存从底层读取的各节点原始 YAML 配置声明。
     pub node_configs: HashMap<String, String>,
-    // 用于控制左侧节点列表的滚动与选中
+    /// 左侧节点清单组件的内置焦点状态管理。
     pub node_list_state: ListState,
-    // 用于控制右侧日志的上下滚动
+    /// 右侧日志视图距离底部的滚动偏移量（行数）。
     pub log_scroll_offset: u16,
-    // 性能监控：记录工作流启动时间
+    /// 记录 TUI 启动的时间，用于推算引擎生命周期运行总耗时。
     pub start_time: Instant,
-    // 性能监控：当前活跃的 CPU 异步任务数
+    /// 监控底层执行引擎当前正在并发处理的任务数。
     pub running_tasks: usize,
-    // 持久化日志文件句柄
+    /// 调试日志追加写入的底层持久化文件句柄。
     pub log_file: File,
-    // 保存从引擎拿到的标准显示顺序
+    /// 各节点在界面的标准展示顺序（基于引擎提供的拓扑排序）。
     pub display_order: Vec<String>,
-    // 记录 spinner 的动画帧
+    /// 终端动画占位符的帧索引计数器。
     pub spinner_tick: usize,
+    /// 控制日志区域是否自动跟随最新输出滚动的开关。
     pub auto_scroll: bool,
-    // 人工审批的挂起状态记录
+    /// 记录当前正在等待人工干预授权的节点 ID。
     pub awaiting_approval: Option<String>,
 }
 
 impl AppState {
+    /// 构造并初始化全局 TUI 状态。
+    ///
+    /// 在初始化内存状态的同时，建立对指定目录下日志文件的持久化写入连接。
+    ///
+    /// # Arguments
+    ///
+    /// * `display_order` - 经过拓扑排序的节点标识符列表。
+    /// * `timestamp` - 引擎本次启动的全局时间戳。
+    /// * `node_configs` - 预解析的全量节点配置静态映射表。
+    ///
+    /// # Panics
+    ///
+    /// 若无法在 `outputs/debug_logs` 目录下创建或打开日志文件，此函数将直接触发恐慌。
     pub fn new(
         display_order: Vec<String>,
         timestamp: &str,
         node_configs: HashMap<String, String>,
     ) -> Self {
-        // ✨ 定义统一的日志目录
         let log_dir = "outputs/debug_logs";
         fs::create_dir_all(log_dir).ok();
 
-        // ✨ 组合出带有时间戳的文件名
         let file_path = format!("{}/{}_ui_history.log", log_dir, timestamp);
 
         let log_file = OpenOptions::new()
@@ -271,7 +307,7 @@ impl AppState {
             awaiting_approval: None,
         };
 
-        // ✨ 初始化时，为所有的节点预先在 node_status 中占个位置，状态设为“等待调度”
+        // 初始化节点状态表，预置默认等待描述
         for id in &state.display_order {
             state
                 .node_status
@@ -279,29 +315,24 @@ impl AppState {
         }
 
         state.node_list_state.select(Some(0));
-        // 使用我们即将编写的新方法写入第一条初始化日志
         state.add_log(
             "[系统] 初始化完成，按 'q' 退出，'↑/↓' 选择节点，'鼠标滚动' 滚屏...".to_string(),
         );
         state
     }
 
-    // ✨ 核心升级：统一日志写入方法（双写机制）
+    /// 追加记录系统全局日志，执行双写策略（同时存入内存与磁盘）。
     pub fn add_log(&mut self, msg: String) {
-        // 1. 写入内存，用于 TUI 屏幕渲染
         self.logs.push(msg.clone());
         if self.auto_scroll {
-            // 只在用户没有往上翻看记录时，才自动滚到底部
             self.log_scroll_offset = 0;
         }
 
-        // 2. 写入本地磁盘，用于永久追溯
         let now = Local::now().format("%Y-%m-%d %H:%M:%S");
-        // 使用 writeln! 宏直接写入文件并换行
         let _ = writeln!(self.log_file, "[{}] {}", now, msg);
     }
 
-    // 键盘交互：选中上一个节点
+    /// 将节点列表的焦点向上移动一项。
     pub fn previous_node(&mut self) {
         let i = match self.node_list_state.selected() {
             Some(i) => {
@@ -318,7 +349,7 @@ impl AppState {
         self.auto_scroll = true;
     }
 
-    // 键盘交互：选中下一个节点
+    /// 将节点列表的焦点向下移动一项。
     pub fn next_node(&mut self, total_len: usize) {
         let i = match self.node_list_state.selected() {
             Some(i) => {
@@ -335,45 +366,49 @@ impl AppState {
         self.auto_scroll = true;
     }
 
-    // 日志滚动
+    /// 向上翻阅历史日志（增加针对底部基准的偏移行数）。
     pub fn scroll_logs_up(&mut self) {
-        // 向上滚动，也就是看更旧的日志，意味着 offset 增加（离底部更远）
-        // 我们需要改变 offset 的语义，把它当做 "距离底部的行数" 会更简单
         self.log_scroll_offset = self.log_scroll_offset.saturating_add(2);
         self.auto_scroll = false;
     }
 
+    /// 向下翻阅最新日志（减少针对底部基准的偏移行数）。
     pub fn scroll_logs_down(&mut self) {
-        // 向下滚动，也就是看更新的日志，意味着 offset 减少
         self.log_scroll_offset = self.log_scroll_offset.saturating_sub(2);
-
         if self.log_scroll_offset == 0 {
-            self.auto_scroll = true; // 滚回最底下了，恢复自动滚动
+            self.auto_scroll = true;
         }
     }
 
+    /// 获取当前动画占位符的具体字符形态。
     pub fn get_spinner_frame(&self) -> &str {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         frames[self.spinner_tick % frames.len()]
     }
 }
 
-// 🎨 核心绘制逻辑（被 main.rs 调用）
+/// 终端界面渲染的主入口调用。
+///
+/// 此方法在事件循环中触发，负责按比例划分屏幕布局、抽取系统状态，
+/// 并调度相应的 `ratatui` 组件进行控制台绘图。
+///
+/// # Arguments
+///
+/// * `f` - 控制台渲染帧上下文。
+/// * `app_state` - 系统的全局共享状态机引用。
 pub fn draw_ui(f: &mut Frame, app_state: &mut AppState) {
-    // 1. 全局垂直切分：主视图 (占据绝大部分) + 底部状态栏 (固定 3 行)
+    // 垂直切分布局：主视区占用多数空间，底部状态栏固定长度
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(3)].as_ref())
         .split(f.size());
 
-    // 2. 主视图水平切分：左侧节点树 (自适应) + 右侧日志区 (剩余全部)
+    // 水平切分布局：左侧导航面板固定宽度，右侧日志面板自适应填充剩余空间
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        // 🚀 核心修复：左侧严格固定 45 列，右侧像水一样贪婪填满所有剩余空间！绝不留白！
         .constraints([Constraint::Length(45), Constraint::Min(0)].as_ref())
         .split(main_chunks[0]);
 
-    // ✨ 替换为：直接使用引擎计算好的拓扑顺序！
     let mut node_items = Vec::new();
     let global_status = if app_state.running_tasks > 0 {
         "⚡ 引擎运转中"
@@ -385,7 +420,7 @@ pub fn draw_ui(f: &mut Frame, app_state: &mut AppState) {
         global_status
     )));
 
-    // ✨ 2. 遍历实际的执行节点
+    // 基于引擎预计算的拓扑顺序进行结构渲染
     for id in &app_state.display_order {
         let mut status = app_state.node_status.get(id).unwrap().clone();
         if status.contains("思考中...") {
@@ -411,17 +446,15 @@ pub fn draw_ui(f: &mut Frame, app_state: &mut AppState) {
 
     f.render_stateful_widget(nodes_list, top_chunks[0], &mut app_state.node_list_state);
 
-    // ✨ 3. 决定右侧面板显示什么内容 (核心联动逻辑)
+    // 基于左侧焦点的视图路由：若选择全局节点则呈现系统日志，若选择独立节点则渲染组件详情
     let selected_idx = app_state.node_list_state.selected().unwrap_or(0);
 
     let log_text = if selected_idx == 0 {
-        // [模式 A] 选中第 0 项（伪节点），显示全局所有日志流
         app_state.logs.join("\n\n")
     } else {
-        // [模式 B] 选中了具体节点，提取它的私有详细数据
-        let real_node_id = &app_state.display_order[selected_idx - 1]; // 减 1 抵消掉全局伪节点
+        let real_node_id = &app_state.display_order[selected_idx - 1];
 
-        // 提取并美化该节点的 YAML 配置（利用你之前写的高亮逻辑，加上 > 前缀让它变成浅蓝色的极客风格！）
+        // 抽取原始配置文件信息，附加引用块前缀以触发 Markdown 高亮渲染
         let raw_yaml = app_state
             .node_configs
             .get(real_node_id)
@@ -451,62 +484,52 @@ pub fn draw_ui(f: &mut Frame, app_state: &mut AppState) {
         }
     };
 
-    // ✨ 遍历所有文本行，将其转换为带色彩的 Markdown 结构
+    // 遍历文本行，按序转换为带有颜色及样式特征的格式化段落组件
     let mut colored_lines = Vec::new();
     for line in log_text.lines() {
         if line.is_empty() {
-            colored_lines.push(Line::default()); // 处理空行
+            colored_lines.push(Line::default());
         } else {
-            colored_lines.push(highlight_log_line(line)); // 调用刚才写好的高亮函数
+            colored_lines.push(highlight_log_line(line));
         }
     }
 
-    // ✨ 1. 获取面板可用的内部宽度（减去左右 Borders）
     let inner_width = top_chunks[1].width.saturating_sub(2);
-
-    // ✨ 2. 编写一个“终端自动换行模拟器”，精准计算视觉行数
     let mut real_total_lines = 0;
 
-    // 增加安全校验：防止终端窗口被缩到极小导致除零崩溃
+    // 边界值安全校验：防止终端窗口被拉伸过小导致的除零异常
     if inner_width > 0 {
         for line in log_text.lines() {
             let line_width = line.width() as u16;
 
-            // 如果这一行本来就很短，完美放下，那就是 1 视觉行（也完美兼容 \n\n 产生的空行）
             if line_width <= inner_width {
                 real_total_lines += 1;
                 continue;
             }
 
-            // 🚀 如果超长，我们模拟 Ratatui 的单词截断 (Word Wrap) 算法！
+            // 模拟底层渲染机制计算基于单词拆分的折行排版逻辑
             let mut current_line_width = 0;
 
             for word in line.split(' ') {
                 let word_width = word.width() as u16;
-
-                // 判断是否需要加空格（如果是新的一行的第一个单词，前面不加空格）
                 let space_width = if current_line_width > 0 { 1 } else { 0 };
 
                 if current_line_width + space_width + word_width > inner_width {
-                    // 放不下了，发生换行！
                     if current_line_width > 0 {
-                        real_total_lines += 1; // 结算上一行
+                        real_total_lines += 1;
                     }
 
                     if word_width > inner_width {
-                        // 遇到极端情况（如连续的中文、超长无空格的 URL），单词本身比屏幕还宽，只能暴力切断
+                        // 防御性折行：直接切断超长且无空格的连续文本串
                         real_total_lines += word_width.div_ceil(inner_width) - 1;
                         current_line_width = word_width % inner_width;
                     } else {
-                        // 正常的英文单词，另起一行放下
                         current_line_width = word_width;
                     }
                 } else {
-                    // 还能放下，继续往当前行塞
                     current_line_width += space_width + word_width;
                 }
             }
-            // 结算最后遗留的字符
             if current_line_width > 0 {
                 real_total_lines += 1;
             }
@@ -515,16 +538,12 @@ pub fn draw_ui(f: &mut Frame, app_state: &mut AppState) {
 
     real_total_lines += 1;
 
-    // ✨ 3. 获取当前日志面板的实际内部高度
     let viewport_height = top_chunks[1].height.saturating_sub(2);
-
-    // ✨ 4. 基于真实的视觉行数计算触底滚动量
     let max_scroll = real_total_lines.saturating_sub(viewport_height);
 
     let scroll_y = if app_state.auto_scroll {
-        max_scroll // 自动滚动时，定位到最底部
+        max_scroll
     } else {
-        // 手动滚动时，从最底部往回减去 offset
         max_scroll.saturating_sub(app_state.log_scroll_offset)
     };
 
@@ -539,15 +558,12 @@ pub fn draw_ui(f: &mut Frame, app_state: &mut AppState) {
 
     f.render_widget(logs_paragraph, top_chunks[1]);
 
-    // 绘制底部：系统运行状态栏 (酷炫的极客面板)
+    // 绘制底部系统全局运行状态监控栏
     let elapsed = app_state.start_time.elapsed().as_secs_f32();
-
-    // ✨ 调用我们刚才写好的格式化函数
     let formatted_time = format_duration(elapsed);
 
     let status_text = vec![Line::from(vec![
         Span::styled(
-            // ✨ 替换掉原来的 {:.2}s，使用智能字符串
             format!("⏱️ 运行总耗时: {}  |  ", formatted_time),
             Style::default().fg(Color::Cyan),
         ),
