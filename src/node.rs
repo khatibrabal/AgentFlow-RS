@@ -386,8 +386,13 @@ impl ExecutableNode for SpiderNode {
 
     async fn execute(&self, input: &str, debug: bool, timestamp: &str) -> Result<String> {
         let root_url = input.trim();
-        if !(root_url.starts_with("http://") || root_url.starts_with("https://")) {
-            anyhow::bail!("爬虫需要一个合法的 URL 作为输入: {}", root_url);
+
+        let is_valid_http = Url::parse(root_url)
+            .map(|u| u.scheme() == "http" || u.scheme() == "https")
+            .unwrap_or(false);
+
+        if !is_valid_http {
+            anyhow::bail!("爬虫需要一个合法的 HTTP/HTTPS URL 作为输入: {}", root_url);
         }
 
         let client = reqwest::Client::builder()
@@ -874,7 +879,7 @@ impl MultiModalParseNode {
         let ffmpeg_cmd = if Path::new(local_ffmpeg).exists() {
             local_ffmpeg
         } else {
-            "ffmpeg" // 智能降级：如果本地没带，尝试调用系统全局环境变量里的 ffmpeg
+            "ffmpeg"
         };
 
         // 利用 FFmpeg 将输入音频重采样为 16kHz WAV
@@ -946,7 +951,7 @@ impl ExecutableNode for MultiModalParseNode {
             &self.file_path
         };
 
-        let path = Path::new(target_path); // 用 target_path 替代 self.file_path
+        let path = Path::new(target_path);
         if !path.exists() {
             anyhow::bail!("找不到指定的文件: {}", target_path);
         }
@@ -964,7 +969,6 @@ impl ExecutableNode for MultiModalParseNode {
             "png" | "jpg" | "jpeg" | "bmp" => {
                 Self::parse_image(path).context("OCR 解析分支崩溃")?
             }
-            // 🎙️ 新增的音频推理分支！
             "mp3" | "wav" | "m4a" | "flac" | "ogg" => {
                 Self::parse_audio(path).context("本地音频 AI 推理分支崩溃")?
             }
@@ -977,7 +981,7 @@ impl ExecutableNode for MultiModalParseNode {
         }
 
         let final_output = format!(
-            "=== [来源文件: {}] ===\n\n{}",
+            "=== 来源文件: {} ===\n\n{}",
             path.display(),
             content.trim()
         );
@@ -1069,7 +1073,7 @@ impl ExecutableNode for LocalVectorSearchNode {
         let mut final_context = format!("基于本地知识库，针对 `{}` 的召回结果：\n\n", self.query);
         for (idx, score) in scored_chunks.into_iter().take(self.top_k) {
             final_context.push_str(&format!(
-                "--- [匹配度: {:.2}%] ---\n{}\n\n",
+                "--- 匹配度: {:.2}% ---\n{}\n\n",
                 score * 100.0,
                 chunks[idx].trim()
             ));
@@ -1096,17 +1100,34 @@ impl ExecutableNode for ApprovalNode {
         &self.id
     }
     fn name(&self) -> &str {
-        "人工审批决策网关"
+        "✋ 人工审批"
     }
 
-    async fn execute(&self, input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
+    async fn execute(&self, _input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
+        // 屏蔽旧接口，强制走流式接口以发送控制信令
+        anyhow::bail!("ApprovalNode 必须通过 execute_with_stream 进行动态调度");
+    }
+
+    async fn execute_with_stream(
+        &self,
+        input: &str, // 接收上游的数据
+        _debug: bool,
+        _timestamp: &str,
+        log_tx: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<String> {
+        // 1. 发送魔法控制信令，通知底层 Executor 拦截并触发 TUI 的审批状态
+        let _ = log_tx.send(format!("__REQUIRE_APPROVAL__::{}", self.message)).await;
+
+        // 2. 挂起当前协程，死等前端的键盘广播
         let mut rx = self.rx.resubscribe();
         loop {
             if let Ok(key) = rx.recv().await {
                 if key == 'y' {
+                    let _ = log_tx.send("✅ 人工审批已显式通过，数据放行。".to_string()).await;
+                    // 3. 数据透传：将上游传来的 input 原封不动地交给下游！
                     return Ok(input.to_string());
                 } else if key == 'n' {
-                    anyhow::bail!("特权阻断：指令操作已被鉴权终端显式取消拦截。");
+                    anyhow::bail!("特权阻断：操作已被鉴权终端显式取消。");
                 }
             }
         }
@@ -1191,14 +1212,11 @@ impl ReActAgentNode {
         log_tx: tokio::sync::mpsc::Sender<String>,
     ) -> String {
         if let Some(wrapper) = self.registered_tools.get(action_name) {
-            match wrapper
+            wrapper
                 .node
                 .execute_with_stream(action_input, debug, timestamp, log_tx)
                 .await
-            {
-                Ok(result) => result,
-                Err(e) => format!("工具执行崩溃: {}", e),
-            }
+                .unwrap_or_else(|e| format!("工具执行崩溃: {}", e))
         } else {
             format!(
                 "Error: 找不到名为 '{}' 的工具，请检查工具名称是否拼写正确。",
