@@ -1,8 +1,18 @@
 //! # Headless API 服务器模块 (Web Server)
 //!
-//! 本模块基于 `axum` 框架，为工作流引擎提供 RESTful API 接口。
-//! 允许系统以无头（Headless）模式运行，支持通过 HTTP 请求动态加载 YAML 配置、
+//! 本模块基于 `axum` 异步 Web 框架，为 AgentFlow-RS 工作流引擎提供 RESTful API 接口。
+//! 允许系统以无头（Headless）模式运行，支持通过 HTTP/HTTPS 请求动态加载 YAML 配置、
 //! 触发异步工作流执行，并支持在离线状态下静态解析 DAG 的 Mermaid 拓扑结构。
+//!
+//! ## 安全与部署规范 (Security & Deployment)
+//! - **本地开发**: 默认绑定 `0.0.0.0`，在控制台提示中使用本地回环地址 (`127.0.0.1`)。
+//! - **生产环境 (Production)**: 强烈建议在暴露给外网前，将此服务置于 **Nginx**、**Traefik** 或 **Caddy**
+//!   等反向代理之后，以提供安全的 `https://` (TLS) 加密传输通道，避免认证信息在公网明文传输。
+//!
+//! ## 核心路由 (Endpoints)
+//! - `GET /health` : 微服务存活探针 (Liveness Probe)。
+//! - `POST /api/v1/workflow/run` : 提交负载并触发 DAG 工作流异步执行。
+//! - `GET /api/v1/workflow/topology` : 静态提取图拓扑模型。
 
 // src/server.rs
 use axum::{
@@ -15,7 +25,7 @@ use axum::{
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tower_http::cors::CorsLayer;
 
 use crate::executor::ExecutionEvent;
@@ -91,32 +101,40 @@ pub async fn start_api_server(port: u16, config_path: String, debug: bool) -> an
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).await?;
+    let bind_addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&bind_addr).await?;
+
+    let scheme = "http";
+    let local_host = "127.0.0.1";
 
     println!(
         r#"
 ===================================================================
  🚀 AgentFlow-RS | Headless Engine Active
 ===================================================================
- 📡 监听网络 : http://{}
+ 📡 监听网络 : {}://{}
  📄 默认挂载 : {}
- 🛡️  CORS跨域 : 已全局放行 (Permissive)
+ 🛡️ CORS 跨域 : 已全局放行 (Permissive)
+ 🔒 安全提示 : 生产环境暴露外网时，请务必前置反向代理以提供 HTTPS/TLS 加密支持。
 
  📌 路由表 (Endpoints):
-    [GET]  http://127.0.0.1:{}/health                   -> 微服务健康心跳检查
-    [GET]  http://127.0.0.1:{}/api/v1/workflow/topology -> 实时拉取 DAG 拓扑图 (支持 ?config_path=...)
-    [POST] http://127.0.0.1:{}/api/v1/workflow/run      -> 异步触发 Agent 工作流
+    [GET]  {}://{}:{}/health                   -> 微服务健康检查
+    [GET]  {}://{}:{}/api/v1/workflow/topology -> 实时拉取 DAG 拓扑图 (支持 ?config_path=...)
+    [POST] {}://{}:{}/api/v1/workflow/run      -> 异步触发 Agent 工作流 (支持 ?config_path=...)
 
  💡 终端极速测试指令 (支持动态覆盖 YAML 路径):
-    curl -X POST http://127.0.0.1:{}/api/v1/workflow/run \
+    curl -X POST {}://{}:{}/api/v1/workflow/run \
          -H "Content-Type: application/json" \
          -d "{{\\\"initial_input\\\": \\\"帮我总结科研进展\\\", \\\"config_path\\\": \\\"my_spider.yaml\\\"}}"
 
  🛑 关闭并退出微服务：Ctrl + C
 ===================================================================
 "#,
-        addr, config_path, port, port, port, port
+        scheme, bind_addr, config_path,
+        scheme, local_host, port,
+        scheme, local_host, port,
+        scheme, local_host, port,
+        scheme, local_host, port
     );
 
     axum::serve(listener, app)
@@ -143,12 +161,15 @@ async fn handle_run_workflow(
     // 优先使用请求体中携带的配置路径，否则降级回滚至系统全局默认路径
     let target_config = payload.config_path.unwrap_or(state.default_config_path);
 
+    let (broadcast_tx, _broadcast_rx) = broadcast::channel::<char>(16);
+
     // 动态反序列化并构建具有环路校验的安全执行引擎
     let engine_result = GraphBuilder::build_from_yaml(
         &target_config,
         state.debug_mode,
         &run_timestamp,
         &initial_input,
+        broadcast_tx,
     );
 
     let engine = match engine_result {
@@ -234,12 +255,15 @@ async fn handle_get_topology(
     // 解析目标配置文件路径
     let target_config = query.config_path.unwrap_or(state.default_config_path);
 
+    let (broadcast_tx, _broadcast_rx) = broadcast::channel::<char>(16);
+
     // 实例化引擎构建图谱（包含底层的拓扑校验逻辑）
     let engine_result = GraphBuilder::build_from_yaml(
         &target_config,
         state.debug_mode,
         &run_timestamp,
         "API Topology Check",
+        broadcast_tx,
     );
 
     match engine_result {
