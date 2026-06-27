@@ -204,7 +204,7 @@ edges:
 | **Text**                 | 📥 IO     | 用户文本输入                                                 |
 | **FileRead**             | 📥 IO     | 本地文本文档读取                                             |
 | **FileWrite**            | 📥 IO     | 附带时间戳隔离的本地结果持久化。<br />产出文件将自动保存至 `outputs/reports/` 目录下。 |
-| **MultiModalParse**      | 📥 IO     | 智能解析 PDF, DOCX, 图片(OCR) 和 音频(语音转文字)            |
+| **MultiModalParse**      | 📥 IO     | 智能解析 PDF, DOCX 等文件, 图片(OCR) 和 音频(语音转文字)            |
 | **RegexMatch**           | 🌊 处理   | 文本正则清洗捕获                                             |
 | **Router**               | 🌊 处理   | 条件分支路由(控制流)                                         |
 | **LocalRAG**             | 🧠 AI     | 基于 FastEmbed 的离线文本滑窗分块与余弦相似度检索            |
