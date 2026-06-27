@@ -207,7 +207,7 @@ edges:
 | **MultiModalParse**      | 📥 IO     | 智能解析 PDF, DOCX 等文件, 图片(OCR) 和 音频(语音转文字)            |
 | **RegexMatch**           | 🌊 处理   | 文本正则清洗捕获                                             |
 | **Router**               | 🌊 处理   | 条件分支路由(控制流)                                         |
-| **LocalRAG**             | 🧠 AI     | 基于 FastEmbed 的离线文本滑窗分块与余弦相似度检索            |
+| **LocalRAG**             | 🧠 AI     | 基于 FastEmbed 的离线文本滑窗分块与余弦相似度的本地向量检索            |
 | **DeepSeek**             | 🧠 AI     | 标准化的大语言模型分析与文本总结节点                         |
 | **ReActAgent**           | 🤖 代理   | 自主智能体中枢，根据 Prompt 自发调用爬虫/Shell等工具         |
 | **Spider**               | 🛠️ 工具   | 并发无栈协程网页爬虫，内置 DOM 降噪清洗                      |
