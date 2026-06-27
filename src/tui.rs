@@ -100,7 +100,10 @@ fn highlight_log_line(line: &str) -> Line<'_> {
 
     // 基于系统日志的特定前缀标识符进行动态的基准色路由
     if let Some(rest) = remaining.strip_prefix("▶️ ") {
-        spans.push(Span::styled("▶️ ", Style::default().fg(Color::LightGreen)));
+        spans.push(Span::styled(
+            "▶️ ",
+            Style::default().fg(Color::LightGreen)).bold(),
+        );
         base_style = Style::default().fg(Color::LightGreen);
         remaining = rest;
     } else if let Some(rest) = remaining.strip_prefix("✔️ ") {
@@ -125,13 +128,23 @@ fn highlight_log_line(line: &str) -> Line<'_> {
         base_style = Style::default().fg(Color::Rgb(241, 187, 62));
         remaining = rest;
     } else if let Some(rest) = remaining.strip_prefix("🔍 ") {
-        spans.push(Span::styled("🔍 ", Style::default().fg(Color::LightCyan)));
+        spans.push(Span::styled(
+            "🔍 ",
+            Style::default().fg(Color::LightCyan)).bold(),
+        );
         base_style = Style::default().fg(Color::LightCyan);
+        remaining = rest;
+    } else if let Some(rest) = remaining.strip_prefix("=== 🤖") {
+        spans.push(Span::styled(
+            "=== 🤖 ",
+            Style::default().fg(Color::LightYellow),
+        ));
+        base_style = Style::default().fg(Color::LightYellow);
         remaining = rest;
     } else if let Some(rest) = remaining.strip_prefix("🧠 ") {
         spans.push(Span::styled(
             "🧠 ",
-            Style::default().fg(Color::Rgb(243, 198, 213)),
+            Style::default().fg(Color::Rgb(243, 198, 213)).bold(),
         ));
         base_style = Style::default().fg(Color::Rgb(243, 198, 213));
         remaining = rest;
@@ -166,9 +179,23 @@ fn highlight_log_line(line: &str) -> Line<'_> {
     } else if let Some(rest) = remaining.strip_prefix("[系统] ") {
         spans.push(Span::styled(
             "[系统] ",
-            Style::default().fg(Color::LightCyan),
+            Style::default().fg(Color::LightCyan).bold(),
         ));
         base_style = Style::default().fg(Color::LightCyan);
+        remaining = rest;
+    } else if let Some(rest) = remaining.strip_prefix("=== 来源文件: ") {
+        spans.push(Span::styled(
+            "=== 来源文件: ",
+            Style::default().fg(Color::Rgb(241, 187, 62)),
+        ));
+        base_style = Style::default().fg(Color::Rgb(241, 187, 62));
+        remaining = rest;
+    } else if let Some(rest) = remaining.strip_prefix("--- 匹配度: ") {
+        spans.push(Span::styled(
+            "--- 匹配度: ",
+            Style::default().fg(Color::LightYellow),
+        ));
+        base_style = Style::default().fg(Color::LightYellow);
         remaining = rest;
     }
 
