@@ -453,8 +453,8 @@ impl eframe::App for NodeGraphApp {
                     self.last_saved = Some(Instant::now());
                 }
 
-                if let Some(save_time) = self.last_saved {
-                    if save_time.elapsed().as_secs() < 3 {
+                if let Some(save_time) = self.last_saved
+                    && save_time.elapsed().as_secs() < 3 {
                         ui.label(
                             egui::RichText::new(format!(
                                 "✅ 已成功导出至 {}！",
@@ -463,7 +463,6 @@ impl eframe::App for NodeGraphApp {
                                 .color(egui::Color32::GREEN),
                         );
                     }
-                }
             });
         });
 
@@ -684,11 +683,9 @@ fn export_graph_to_yaml(graph: &MyGraph, filename: &str) {
         for (param_name, param_id) in &node.inputs {
             if param_name == "ID"
                 && let MyValueType::Text(val) = &graph.inputs.get(*param_id).unwrap().value
-            {
-                if !val.trim().is_empty() {
+                && !val.trim().is_empty() {
                     target_id = val.trim().to_string();
                 }
-            }
         }
 
         id_map.insert(node_id, target_id.clone());
