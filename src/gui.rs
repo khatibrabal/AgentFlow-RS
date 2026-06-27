@@ -262,7 +262,7 @@ impl NodeTemplateTrait for MyNodeTemplate {
             }
             MyNodeTemplate::ReActAgent => {
                 add_in!();
-                add_num!("max_pages", 5);
+                add_num!("max_steps", 5);
                 add_out!();
             }
         }
@@ -432,6 +432,12 @@ impl NodeGraphApp {
 
 impl eframe::App for NodeGraphApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+
+        // 按下 Esc 键或 Ctrl+Q 优雅关闭窗口
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.modifiers.ctrl && i.key_pressed(egui::Key::Q))) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("🚀 AgentFlow-RS | 可视化设计态 (Design-Time)");
@@ -763,7 +769,7 @@ fn export_graph_to_yaml(graph: &MyGraph, filename: &str) {
     }
 
     fs::write(filename, yaml_out).unwrap_or_else(|_| panic!("无法写入 {}", filename));
-    println!("成功从可视化画布生成 {} !", filename);
+    println!("✅ 成功从可视化画布生成 {} !", filename);
 }
 
 /// 图形化编辑器前端环境启动入口。
