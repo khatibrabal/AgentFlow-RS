@@ -476,12 +476,23 @@ impl WorkflowExecutor {
             // 派生独立的协程负责监控数据通道，将增量日志实时封装为流事件并推送至外层主循环
             tokio::spawn(async move {
                 while let Some(msg) = log_rx.recv().await {
-                    let _ = ui_tx_log
-                        .send(ExecutionEvent::StreamLog {
-                            node_id: node_id_log.clone(),
-                            message: msg,
-                        })
-                        .await;
+                    // 拦截特殊的审批魔法信令
+                    if let Some(prompt) = msg.strip_prefix("__REQUIRE_APPROVAL__::") {
+                        let _ = ui_tx_log
+                            .send(ExecutionEvent::RequireApproval {
+                                node_id: node_id_log.clone(),
+                                prompt: prompt.to_string(),
+                            })
+                            .await;
+                    } else {
+                        // 普通日志按原样推流
+                        let _ = ui_tx_log
+                            .send(ExecutionEvent::StreamLog {
+                                node_id: node_id_log.clone(),
+                                message: msg,
+                            })
+                            .await;
+                    }
                 }
             });
 
@@ -554,7 +565,11 @@ mod tests {
         // 实现执行契约并模拟延时计算
         async fn execute(&self, _input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            self.execution_order.lock().unwrap().push(self.id.clone());
+            self.execution_order
+                .lock()
+                .map_err(|e| anyhow::anyhow!("测试节点互斥锁错误: {}", e))?
+                .push(self.id.clone());
+
             Ok("Mock OK".to_string())
         }
     }
