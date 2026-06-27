@@ -164,7 +164,7 @@ cargo run -- -c test.yml --export-dot test_graph
 cargo run -- --config my_flow.yaml --export-mermaid flow_diagram
 ```
 
-产出文件将自动保存至 `outputs/visualizations/` 目录下。
+- 产出文件将自动保存至 `outputs/visualizations/` 目录下。
 
 ## 📜 5. 声明式 YAML 编排规范
 
