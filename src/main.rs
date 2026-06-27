@@ -101,10 +101,15 @@ async fn main() -> anyhow::Result<()> {
 
         // 阻塞当前异步运行时，将控制权安全移交至同步的 GUI 主事件循环。
         let _ = tokio::task::block_in_place(|| gui::start_gui(&config_path));
+
+        println!("👋 图形化设计器已关闭，GUI 安全退出！");
+
         return Ok(());
     }
 
     let target_config = args.config.unwrap_or_else(|| "workflow.yaml".to_string());
+
+    let (broadcast_tx, _broadcast_rx) = broadcast::channel::<char>(16);
 
     // 读取配置文件，反序列化并构建具有循环依赖校验的 DAG 执行引擎内存拓扑模型。
     let engine = graph::GraphBuilder::build_from_yaml(
@@ -112,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         args.debug,
         &run_timestamp,
         "User Request: 开始运行！",
+        broadcast_tx.clone(),
     )?;
 
     // 路由分支：静态拓扑分析与导出模式
@@ -175,7 +181,6 @@ async fn main() -> anyhow::Result<()> {
 
     // 建立执行引擎与 UI 之间的异步通信管道。
     let (tx, mut rx) = mpsc::channel::<ExecutionEvent>(32);
-    let (broadcast_tx, _broadcast_rx) = broadcast::channel::<char>(16);
 
     // 将执行调度任务提交至 Tokio 异步后台线程池。
     tokio::spawn(async move {
@@ -218,7 +223,7 @@ async fn main() -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
 
     // 启动终端界面的主事件轮询循环。
-    'mainloop: loop {
+    'mainLoop: loop {
         tokio::select! {
             // 监听并处理执行引擎向上传递的状态流转信令事件。
             Some(event) = rx.recv() => {
@@ -288,9 +293,9 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             } else {
                                 match key.code {
-                                    KeyCode::Char('q') => break 'mainloop,
+                                    KeyCode::Char('q') => break 'mainLoop,
                                     KeyCode::Esc => {
-                                        break 'mainloop;
+                                        break 'mainLoop;
                                     }
                                     KeyCode::Up => app_state.previous_node(),
                                     KeyCode::Down => app_state.next_node(total_list_items),
