@@ -1,3 +1,9 @@
+//! # 工作流可视化设计器模块 (GUI Editor)
+//!
+//! 本模块基于 `eframe` 和 `egui_node_graph2` 框架，提供了一个图形化的有向无环图 (DAG) 工作流设计界面。
+//! 核心功能涵盖：节点拖拽编排、组件参数的动态配置、拓扑结构的实时渲染，
+//! 以及在 GUI 内存模型与标准引擎 YAML 配置文件之间的双向解析与持久化。
+
 // src/gui.rs
 use eframe::egui;
 use egui_node_graph2::*;
@@ -7,17 +13,25 @@ use std::collections::HashMap;
 use std::fs;
 use std::time::Instant;
 
-// 1. 定义节点间流动的数据类型
+/// 节点连线与引脚的传输数据类型。
+///
+/// 在可视化图中，引脚分为两大类：用于图计算拓扑的数据流连线，以及用于界面展示的静态配置项参数。
 #[derive(PartialEq, Eq, Deserialize, Serialize)]
 pub enum MyDataType {
+    /// 表示节点之间的动态数据流动，仅用于连接引脚。
     Flow,
+    /// 表示节点自身的静态属性或配置参数，通常伴随输入控件。
     Param,
 }
 
-// 2. 定义插槽的默认值类型
+/// 节点引脚绑定的默认数据值枚举。
+///
+/// 涵盖了当前工作流引擎支持的基础数据结构，主要用于在 UI 中渲染对应的输入与显示控件。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum MyValueType {
+    /// 纯文本或多行字符串数据。
     Text(String),
+    /// 无符号整型数值数据。
     Number(usize),
 }
 
@@ -27,12 +41,17 @@ impl Default for MyValueType {
     }
 }
 
+/// 节点的内部数据包装载体。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MyNodeData {
+    /// 记录当前节点所对应的工作流组件模板。
     pub template: MyNodeTemplate,
 }
 
-// 3. ✨ 囊括引擎中所有的节点模板
+/// 引擎内置的全量节点模板注册表。
+///
+/// 包含工作流底层所有支持的具体节点类型。每次向底层调度引擎添加新节点时，
+/// 必须在此处同步注册对应的模板，以支持 GUI 界面的拖拽与渲染。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum MyNodeTemplate {
     Text,
@@ -50,9 +69,12 @@ pub enum MyNodeTemplate {
     ReActAgent,
 }
 
+/// 节点内部的自定义响应事件类型。
+/// 当前实现暂未定义特殊交互事件，预留作为扩展接口。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum MyResponse {}
 
+/// 整个图编辑器的全局共享状态。
 #[derive(Default, Serialize, Deserialize)]
 pub struct MyGraphState {}
 
@@ -79,6 +101,7 @@ impl NodeTemplateTrait for MyNodeTemplate {
     type CategoryType = &'static str;
 
     fn node_finder_label(&self, _user_state: &mut Self::UserState) -> Cow<'_, str> {
+        // UI 渲染层保留 Emoji 符号以提升辨识度
         Cow::Borrowed(match self {
             MyNodeTemplate::Text => "纯文本输入 📝",
             MyNodeTemplate::FileRead => "读取文件 📂",
@@ -172,6 +195,10 @@ impl NodeTemplateTrait for MyNodeTemplate {
             };
         }
 
+        // 统一在节点顶部挂载唯一标识符 (ID) 控件，默认使用枚举名称
+        // 用户可通过 UI 点击该属性进行重命名
+        add_text!("ID", format!("{:?}", self));
+
         match self {
             MyNodeTemplate::Text => {
                 add_text!("text", "你好，AgentFlow！");
@@ -224,6 +251,7 @@ impl NodeTemplateTrait for MyNodeTemplate {
             }
             MyNodeTemplate::Approval => {
                 add_in!();
+                add_text!("message", "⚠️ 危险操作，请确认是否继续？(y/n)");
                 add_out!();
             }
             MyNodeTemplate::Router => {
@@ -234,14 +262,14 @@ impl NodeTemplateTrait for MyNodeTemplate {
             }
             MyNodeTemplate::ReActAgent => {
                 add_in!();
-                add_num!("max_pages", 5); // 借用 max_pages 作为思考上限
+                add_num!("max_pages", 5);
                 add_out!();
             }
         }
     }
 }
 
-// ✨ 在面板上渲染对应的输入框组件
+/// 负责将内存参数数据模型渲染为界面对应的可视交互控件。
 impl WidgetValueTrait for MyValueType {
     type Response = MyResponse;
     type UserState = MyGraphState;
@@ -256,7 +284,12 @@ impl WidgetValueTrait for MyValueType {
         _node_data: &Self::NodeData,
     ) -> Vec<Self::Response> {
         ui.horizontal(|ui| {
-            ui.add(egui::Label::new(param_name).truncate());
+            let display_name = if param_name == "ID" {
+                "ID"
+            } else {
+                param_name
+            };
+            ui.add(egui::Label::new(display_name).truncate());
 
             if param_name == "In" || param_name.trim().is_empty() {
                 return;
@@ -270,8 +303,8 @@ impl WidgetValueTrait for MyValueType {
                             egui::FontId::proportional(14.0),
                             egui::Color32::TRANSPARENT,
                         )
-                        .rect
-                        .width()
+                            .rect
+                            .width()
                     });
 
                     let dynamic_width = text_width.clamp(150.0, 400.0) + 20.0;
@@ -320,9 +353,11 @@ impl NodeDataTrait for MyNodeData {
 
 type MyGraph = Graph<MyNodeData, MyDataType, MyValueType>;
 type MyEditorState =
-    GraphEditorState<MyNodeData, MyDataType, MyValueType, MyNodeTemplate, MyGraphState>;
+GraphEditorState<MyNodeData, MyDataType, MyValueType, MyNodeTemplate, MyGraphState>;
 
-// 🌟 GUI 解析专用的精简版 YAML 数据结构
+/// GUI 引擎反序列化专用的节点配置视图。
+///
+/// 相比于底层执行器，此视图结构采用纯量扁平化定义，以便与界面的 UI 控件实现一对一绑定解析。
 #[derive(Deserialize, Debug)]
 struct GuiNodeConfig {
     id: String,
@@ -341,6 +376,7 @@ struct GuiNodeConfig {
     message: Option<String>,
 }
 
+/// GUI 引擎反序列化专用的有向边配置视图。
 #[derive(Deserialize, Debug)]
 struct GuiEdgeConfig {
     from: String,
@@ -348,12 +384,16 @@ struct GuiEdgeConfig {
     condition: Option<String>,
 }
 
+/// GUI 工作流反序列化专用的根配置视图。
 #[derive(Deserialize, Debug)]
 struct GuiWorkflowConfig {
     nodes: Vec<GuiNodeConfig>,
     edges: Vec<GuiEdgeConfig>,
 }
 
+/// 图形化节点编辑器应用程序主结构。
+///
+/// 实现了 `eframe::App` 契约，管理节点图编辑器实例、自动保存状态与文件句柄。
 pub struct NodeGraphApp {
     state: MyEditorState,
     last_saved: Option<Instant>,
@@ -361,18 +401,22 @@ pub struct NodeGraphApp {
 }
 
 impl NodeGraphApp {
+    /// 构造并初始化图编辑器应用程序实例。
+    ///
+    /// # Arguments
+    ///
+    /// * `config_path` - 默认加载与保存的目标 YAML 配置文件路径。如果文件存在，则尝试载入。
     pub fn new(config_path: &str) -> Self {
         let mut state = MyEditorState::new(1.0);
         let mut save_filename = "workflow.yaml".to_string();
 
-        // 🚀 核心逻辑：如果指定了文件并且文件存在，执行反序列化！
         if std::path::Path::new(config_path).exists() {
             if load_graph_from_yaml(&mut state, config_path).is_ok() {
                 save_filename = config_path.to_string();
-                println!("✅ 成功在设计器中载入工作流: {}", config_path);
+                println!("成功在设计器中载入工作流: {}", config_path);
             } else {
                 println!(
-                    "⚠️ 警告: 无法解析工作流文件 {}，将创建一个新画布。",
+                    "警告: 无法解析工作流文件 {}，将创建一个新画布。",
                     config_path
                 );
             }
@@ -409,16 +453,17 @@ impl eframe::App for NodeGraphApp {
                     self.last_saved = Some(Instant::now());
                 }
 
-                if let Some(save_time) = self.last_saved
-                    && save_time.elapsed().as_secs() < 3 {
+                if let Some(save_time) = self.last_saved {
+                    if save_time.elapsed().as_secs() < 3 {
                         ui.label(
                             egui::RichText::new(format!(
                                 "✅ 已成功导出至 {}！",
                                 self.save_filename
                             ))
-                            .color(egui::Color32::GREEN),
+                                .color(egui::Color32::GREEN),
                         );
                     }
+                }
             });
         });
 
@@ -433,12 +478,14 @@ impl eframe::App for NodeGraphApp {
             })
             .inner;
 
+        // 处理底层节点路由事件
         for node_response in graph_response.node_responses {
             if let NodeResponse::User(_) = node_response {}
         }
     }
 }
 
+/// 支持在 UI 中枚举的可用节点集合。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AllMyNodeTemplates;
 impl NodeTemplateIter for AllMyNodeTemplates {
@@ -462,7 +509,19 @@ impl NodeTemplateIter for AllMyNodeTemplates {
     }
 }
 
-// 🚀 反向工程：将 YAML 解析为内存画布模型！
+/// 读取并解析本地 YAML 配置，将其还原至当前编辑器画布模型中。
+///
+/// 该函数会遍历 YAML 中定义的节点配置，在画布中实例化对应模板，并恢复其预存的参数配置。
+/// 随后根据边的定义恢复画布中的拓扑连线关系。
+///
+/// # Arguments
+///
+/// * `state` - UI 库全局编辑器状态结构体引用。
+/// * `path` - 目标读取的 YAML 配置文件路径。
+///
+/// # Errors
+///
+/// 若文件读取异常或反序列化结构映射失败，返回 `anyhow::Error`。
 fn load_graph_from_yaml(state: &mut MyEditorState, path: &str) -> Result<(), anyhow::Error> {
     let content = fs::read_to_string(path)?;
     let config: GuiWorkflowConfig = serde_yaml::from_str(&content)?;
@@ -471,7 +530,7 @@ fn load_graph_from_yaml(state: &mut MyEditorState, path: &str) -> Result<(), any
     let mut x_offset = 0.0;
     let mut y_offset = 0.0;
 
-    // 1. 还原所有节点
+    // 阶段一：重构所有配置节点实例
     for node_conf in &config.nodes {
         let template = match node_conf.node_type.as_str() {
             "Text" => MyNodeTemplate::Text,
@@ -487,20 +546,19 @@ fn load_graph_from_yaml(state: &mut MyEditorState, path: &str) -> Result<(), any
             "Approval" => MyNodeTemplate::Approval,
             "Router" => MyNodeTemplate::Router,
             "ReActAgent" => MyNodeTemplate::ReActAgent,
-            _ => continue, // 忽略未知节点
+            _ => continue, // 忽略无法映射的未知节点
         };
 
-        // 将节点加入画布
+        // 注入目标节点并构建参数插槽
         let node_id = state.graph.add_node(
             node_conf.id.clone(),
             MyNodeData { template },
             |graph, node_id| template.build_node(graph, &mut MyGraphState::default(), node_id),
         );
 
-        // ✨ 关键修复：手动同步 GUI 的节点渲染层级顺序，防止底层断言失败 (Panic 101)
         state.node_order.push(node_id);
 
-        // 简单的自动网格排版算法
+        // 初始化屏幕空间排布坐标
         state.node_positions.insert(node_id, egui::pos2(x_offset, y_offset));
 
         x_offset += 350.0;
@@ -511,13 +569,13 @@ fn load_graph_from_yaml(state: &mut MyEditorState, path: &str) -> Result<(), any
 
         id_map.insert(node_conf.id.clone(), node_id);
 
-        // 还原参数
         let inputs_to_process: Vec<(String, InputId)> = state.graph.nodes[node_id]
             .inputs
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
 
+        // 恢复所有输入型配置项的具体数值
         for (param_name, param_id) in inputs_to_process {
             if param_name == "In" {
                 continue;
@@ -526,6 +584,8 @@ fn load_graph_from_yaml(state: &mut MyEditorState, path: &str) -> Result<(), any
                 match &mut input_param.value {
                     MyValueType::Text(val) => {
                         let new_val = match param_name.as_str() {
+                            // 将 YAML 中的系统 ID 映射回编辑框
+                            "ID" => Some(node_conf.id.clone()),
                             "prompt" => node_conf.prompt.clone(),
                             "text" => node_conf.text.clone(),
                             "file_path" => node_conf.file_path.clone(),
@@ -557,7 +617,7 @@ fn load_graph_from_yaml(state: &mut MyEditorState, path: &str) -> Result<(), any
         }
     }
 
-    // 2. 还原所有连线
+    // 阶段二：重连所有路由有向边
     for edge_conf in &config.edges {
         if let (Some(&from_id), Some(&to_id)) =
             (id_map.get(&edge_conf.from), id_map.get(&edge_conf.to))
@@ -592,7 +652,6 @@ fn load_graph_from_yaml(state: &mut MyEditorState, path: &str) -> Result<(), any
             }
 
             if let (Some(o), Some(i)) = (out_id, in_id) {
-                // 尝试传入默认的泛型或空数据。很多库默认连线数据是 () 或是你的 DataType
                 state.graph.add_connection(o, i, Default::default());
             }
         }
@@ -601,6 +660,16 @@ fn load_graph_from_yaml(state: &mut MyEditorState, path: &str) -> Result<(), any
     Ok(())
 }
 
+/// 导出逻辑：将图形编辑器当前内存模型序列化为标准工作流 YAML 配置。
+///
+/// # Arguments
+///
+/// * `graph` - 编辑器维护的 DAG 图形化对象容器。
+/// * `filename` - 目标输出的磁盘文件路径。
+///
+/// # Panics
+///
+/// 若当前系统缺乏对目标路径的写入权限，将引发运行时恐慌。
 fn export_graph_to_yaml(graph: &MyGraph, filename: &str) {
     let mut yaml_out = String::new();
     yaml_out.push_str("nodes:\n");
@@ -608,17 +677,31 @@ fn export_graph_to_yaml(graph: &MyGraph, filename: &str) {
     let mut id_map = HashMap::new();
 
     for (counter, (node_id, node)) in graph.nodes.iter().enumerate() {
-        let str_id = format!("{:?}_{}", node.user_data.template, counter);
-        id_map.insert(node_id, str_id.clone());
+        // 构建默认的命名空间以防止冲突
+        let mut target_id = format!("{:?}_{}", node.user_data.template, counter);
 
-        yaml_out.push_str(&format!("  - id: \"{}\"\n", str_id));
+        // 如果检测到用户在面板的 ID 输入框覆写了名称，则应用用户设定的值
+        for (param_name, param_id) in &node.inputs {
+            if param_name == "ID"
+                && let MyValueType::Text(val) = &graph.inputs.get(*param_id).unwrap().value
+            {
+                if !val.trim().is_empty() {
+                    target_id = val.trim().to_string();
+                }
+            }
+        }
+
+        id_map.insert(node_id, target_id.clone());
+
+        yaml_out.push_str(&format!("  - id: \"{}\"\n", target_id));
         yaml_out.push_str(&format!(
             "    node_type: \"{:?}\"\n",
             node.user_data.template
         ));
 
         for (param_name, param_id) in &node.inputs {
-            if param_name == "In" || param_name.trim().is_empty() {
+            // 输出配置时剥离内部连接引脚和虚构的 ID 字段
+            if param_name == "In" || param_name == "ID" || param_name.trim().is_empty() {
                 continue;
             }
 
@@ -626,16 +709,13 @@ fn export_graph_to_yaml(graph: &MyGraph, filename: &str) {
             match &input_param.value {
                 MyValueType::Text(val) => {
                     if !val.trim().is_empty() {
-                        // 如果文本中包含真实的换行符，使用 YAML 的块标量语法 (Block Scalar `|`)
                         if val.contains('\n') {
                             yaml_out.push_str(&format!("    {}: |\n", param_name));
-                            // 给每一行文本加上 6 个空格的缩进
                             for line in val.lines() {
                                 yaml_out.push_str(&format!("      {}\n", line));
                             }
                         } else {
-                            // 单行文本，保持原来的引号包裹
-                            let safe_val = val.replace("\"", "\\\"");
+                            let safe_val = val.replace('\"', "\\\"");
                             yaml_out.push_str(&format!("    {}: \"{}\"\n", param_name, safe_val));
                         }
                     }
@@ -674,6 +754,7 @@ fn export_graph_to_yaml(graph: &MyGraph, filename: &str) {
             yaml_out.push_str(&format!("  - from: \"{}\"\n", from_str));
             yaml_out.push_str(&format!("    to: \"{}\"\n", to_str));
 
+            // 对齐条件控制网关的逻辑映射参数
             if port_name == "√ 包含 (True)" {
                 yaml_out.push_str("    condition: \"true\"\n");
             } else if port_name == "× 不包含 (False)" {
@@ -685,17 +766,26 @@ fn export_graph_to_yaml(graph: &MyGraph, filename: &str) {
     }
 
     fs::write(filename, yaml_out).unwrap_or_else(|_| panic!("无法写入 {}", filename));
-    println!("🎉 成功从可视化画布生成 {} !", filename);
+    println!("成功从可视化画布生成 {} !", filename);
 }
 
-// ✨ 修改入口签名，接收配置路径
+/// 图形化编辑器前端环境启动入口。
+///
+/// 内部封装了视窗布局、系统字体跨平台挂载等操作。该函数将阻塞调用方所在线程。
+///
+/// # Arguments
+///
+/// * `config_path` - GUI 启动时默认尝试加载的工作流配置路径。
+///
+/// # Errors
+///
+/// 当系统图形上下文无法初始化时抛出 `eframe::Error` 异常。
 pub fn start_gui(config_path: &str) -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 750.0]),
         ..Default::default()
     };
 
-    // 因为 start_gui 要求闭包具备 'static 生命周期，所以先 clone 一份 string
     let path_clone = config_path.to_string();
 
     eframe::run_native(
@@ -704,6 +794,7 @@ pub fn start_gui(config_path: &str) -> Result<(), eframe::Error> {
         Box::new(move |cc| {
             let mut fonts = egui::FontDefinitions::default();
 
+            // 为 Windows 系统加载默认的宽字符/中文字体库与表情回退机制
             if let Ok(font_data) = fs::read("C:\\Windows\\Fonts\\msyh.ttc") {
                 fonts
                     .font_data
@@ -743,7 +834,6 @@ pub fn start_gui(config_path: &str) -> Result<(), eframe::Error> {
             style.spacing.interact_size = egui::vec2(250.0, 24.0);
             cc.egui_ctx.set_style(style);
 
-            // ✨ 将闭包捕获的路径传给 App 的初始化方法
             Ok(Box::new(NodeGraphApp::new(&path_clone)))
         }),
     )
