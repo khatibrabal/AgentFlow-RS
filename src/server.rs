@@ -1,7 +1,15 @@
+//! # Headless API 服务器模块 (Web Server)
+//!
+//! 本模块基于 `axum` 框架，为工作流引擎提供 RESTful API 接口。
+//! 允许系统以无头（Headless）模式运行，支持通过 HTTP 请求动态加载 YAML 配置、
+//! 触发异步工作流执行，并支持在离线状态下静态解析 DAG 的 Mermaid 拓扑结构。
+
 // src/server.rs
 use axum::{
     Json, Router,
-    extract::{Query, State}, // ✨ 引入 Query 用于 GET 请求参数
+    extract::{Query, State},
+    response::IntoResponse,
+    http::header,
     routing::{get, post},
 };
 use chrono::Local;
@@ -13,38 +21,60 @@ use tower_http::cors::CorsLayer;
 use crate::executor::ExecutionEvent;
 use crate::graph::GraphBuilder;
 
-// 1. 共享的服务器全局状态
+/// Web 服务器的全局共享状态。
+///
+/// 在 Axum 路由层之间共享，用于保存引擎启动时的默认配置路径和运行时模式参数。
 #[derive(Clone)]
 pub struct AppState {
+    /// 默认的工作流 YAML 配置文件挂载路径。
     pub default_config_path: String,
+    /// 是否开启底层执行器的深度调试与遥测模式。
     pub debug_mode: bool,
 }
 
-// 2. 接收外部 POST 请求的 JSON 格式
+/// 接收外部工作流触发请求的 JSON 反序列化结构体。
 #[derive(Deserialize)]
 pub struct WorkflowRunRequest {
-    // 允许外部传入临时参数覆盖工作流初始输入（可选）
+    /// 允许外部传入临时参数以覆盖工作流根节点的初始输入。若留空则使用默认上下文。
     pub initial_input: Option<String>,
-    // ✨ 新增：允许单次请求动态指定要运行的 YAML 文件路径
+    /// 允许在单次 API 调用中动态指定要解析运行的 YAML 配置文件路径。
     pub config_path: Option<String>,
 }
 
-// ✨ 新增：接收外部 GET 请求的 Query 格式
+/// 接收外部拓扑图查询请求的 URL 传参结构体。
 #[derive(Deserialize)]
 pub struct TopologyQuery {
+    /// 指定待解析拓扑的目标 YAML 配置文件路径。
     pub config_path: Option<String>,
 }
 
-// 3. 返回给外部的 JSON 响应格式
+/// 返回给外部调用方的工作流执行结果序列化结构体。
 #[derive(Serialize)]
 pub struct WorkflowRunResponse {
+    /// 本次执行的全局状态标识（如 "Success", "Build_Error"）。
     pub status: String,
+    /// 记录工作流触发时的全局流水线时间戳。
     pub execution_time: String,
+    /// 在 Headless 模式下静默收集的各节点生命周期状态流日志。
     pub logs: Vec<String>,
+    /// 收集所有已完成节点的最终输出载荷，以列表形式返回。
     pub final_results: Vec<String>,
 }
 
-/// 启动 Axum Web 服务器
+/// 实例化并启动 Axum 异步 Web 服务器。
+///
+/// 该方法将绑定指定的网络端口，初始化路由表，挂载 CORS 中间件与优雅停机监听器，
+/// 并最终阻塞当前线程以持续监听外部入站请求。
+///
+/// # Arguments
+///
+/// * `port` - HTTP 服务器监听的本地网络端口号。
+/// * `config_path` - 全局默认的 YAML 工作流配置路径。
+/// * `debug` - 是否开启底层引擎的调试模式。
+///
+/// # Errors
+///
+/// 若指定的端口被占用或底层套接字绑定失败，将返回 I/O 层面的 `anyhow::Error`。
 pub async fn start_api_server(port: u16, config_path: String, debug: bool) -> anyhow::Result<()> {
     let state = AppState {
         default_config_path: config_path.clone(),
@@ -76,7 +106,7 @@ pub async fn start_api_server(port: u16, config_path: String, debug: bool) -> an
  📌 路由表 (Endpoints):
     [GET]  http://127.0.0.1:{}/health                   -> 微服务健康心跳检查
     [GET]  http://127.0.0.1:{}/api/v1/workflow/topology -> 实时拉取 DAG 拓扑图 (支持 ?config_path=...)
-    [POST] http://127.0.0.1:{}/api/v1/workflow/run      -> 异步触发 Agent 工作流 (支持 ?config_path=...)
+    [POST] http://127.0.0.1:{}/api/v1/workflow/run      -> 异步触发 Agent 工作流
 
  💡 终端极速测试指令 (支持动态覆盖 YAML 路径):
     curl -X POST http://127.0.0.1:{}/api/v1/workflow/run \
@@ -90,27 +120,30 @@ pub async fn start_api_server(port: u16, config_path: String, debug: bool) -> an
     );
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal()) // ✨ 挂载停机监听器
+        .with_graceful_shutdown(shutdown_signal())
         .await?;
 
     println!("👋 微服务已安全关闭，再见！");
     Ok(())
 }
 
-/// 处理工作流执行的核心控制器
+/// 核心工作流执行路由控制器。
+///
+/// 响应 POST 请求，依据传入的参数动态构建内存 DAG 模型，并派生异步任务执行图谱。
+/// 期间静默收集引擎内部产生的所有生命周期事件，最终聚合为格式化的 JSON 报文返回。
 async fn handle_run_workflow(
     State(state): State<AppState>,
     Json(payload): Json<WorkflowRunRequest>,
-) -> Json<WorkflowRunResponse> {
+) -> impl IntoResponse {
     let run_timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
     let initial_input = payload
         .initial_input
         .unwrap_or_else(|| "User Request: 开始运行！".to_string());
 
-    // ✨ 核心逻辑：如果请求传了特定的路径，就用请求的；否则降级使用系统默认的
+    // 优先使用请求体中携带的配置路径，否则降级回滚至系统全局默认路径
     let target_config = payload.config_path.unwrap_or(state.default_config_path);
 
-    // 1. 动态构建 DAG 引擎
+    // 动态反序列化并构建具有环路校验的安全执行引擎
     let engine_result = GraphBuilder::build_from_yaml(
         &target_config,
         state.debug_mode,
@@ -121,18 +154,26 @@ async fn handle_run_workflow(
     let engine = match engine_result {
         Ok(e) => e,
         Err(err) => {
-            return Json(WorkflowRunResponse {
+            let response = WorkflowRunResponse {
                 status: "Build_Error".to_string(),
                 execution_time: run_timestamp,
                 logs: vec![format!("读取配置 [{}] 失败: {}", target_config, err)],
                 final_results: vec![],
-            });
+            };
+
+            // 构建失败时，返回格式化后的 JSON 异常信息
+            let pretty_json = serde_json::to_string_pretty(&response).unwrap_or_default();
+            return (
+                [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+                pretty_json,
+            )
+                .into_response();
         }
     };
 
     let (tx, mut rx) = mpsc::channel::<ExecutionEvent>(32);
 
-    // 2. 将引擎投入后台计算池
+    // 将引擎图执行上下文移交至后台任务池
     tokio::spawn(async move {
         let _ = engine.execute_dag(tx).await;
     });
@@ -140,7 +181,7 @@ async fn handle_run_workflow(
     let mut logs = Vec::new();
     let mut final_results = Vec::new();
 
-    // 3. 静默收集执行事件（Headless 模式，不需要 TUI 界面）
+    // 在 Headless 模式下消费执行事件流水，剥离渲染需求，纯粹归档数据
     while let Some(event) = rx.recv().await {
         match event {
             ExecutionEvent::Started { node_id, node_name } => {
@@ -152,7 +193,6 @@ async fn handle_run_workflow(
                 result,
             } => {
                 logs.push(format!("✔️ [{}] {} 执行成功", node_id, node_name));
-                // 将执行结果存入数组准备返回给前端
                 final_results.push(format!("==== Node: {} ====\n{}", node_id, result));
             }
             ExecutionEvent::Failed { node_id, error } => {
@@ -161,44 +201,57 @@ async fn handle_run_workflow(
             ExecutionEvent::Skipped { node_id } => {
                 logs.push(format!("⏭️ [{}] 被路由跳过", node_id));
             }
-            _ => {} // Debug 等事件在 API 返回中暂时忽略
+            _ => {} // Debug 与流式日志在同步 API 返回模式中暂不暴露以压缩报文体积
         }
     }
 
-    // 4. 返回包含完整日志和结果的 JSON
-    Json(WorkflowRunResponse {
+    let response = WorkflowRunResponse {
         status: "Success".to_string(),
         execution_time: run_timestamp,
         logs,
         final_results,
-    })
+    };
+
+    // 工作流执行成功后，强制序列化为带缩进的 Pretty JSON 格式返回
+    let pretty_json = serde_json::to_string_pretty(&response).unwrap_or_default();
+    (
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        pretty_json,
+    )
+        .into_response()
 }
 
+/// DAG 拓扑图离线提取路由控制器。
+///
+/// 响应 GET 请求，读取给定的 YAML 配置文件，通过内置工厂解析，
+/// 在不触发任何实际计算的前提下，输出该工作流的静态 Mermaid 图表文本。
 async fn handle_get_topology(
     State(state): State<AppState>,
-    Query(query): Query<TopologyQuery>, // ✨ 解析 URL 后的 ?config_path=xxx
+    Query(query): Query<TopologyQuery>,
 ) -> String {
     let run_timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
 
-    // ✨ 解析用户想要拉取哪个文件的拓扑图
+    // 解析目标配置文件路径
     let target_config = query.config_path.unwrap_or(state.default_config_path);
 
-    // 1. 每次收到请求时，动态去读取指定的 YAML 配置文件
+    // 实例化引擎构建图谱（包含底层的拓扑校验逻辑）
     let engine_result = GraphBuilder::build_from_yaml(
         &target_config,
         state.debug_mode,
         &run_timestamp,
-        "API Topology Check", // 占位用的 Payload，因为我们不执行，只是建图
+        "API Topology Check",
     );
 
-    // 2. 匹配结果：如果 YAML 正确，直接在内存中生成 Mermaid 字符串并通过 HTTP 返回！
     match engine_result {
         Ok(engine) => engine.generate_mermaid(),
         Err(e) => format!("⚠️ 拓扑图解析失败，请检查 [{}] YAML 语法: {}", target_config, e),
     }
 }
 
-/// 优雅停机信号监听器
+/// POSIX 信号监听器，用于实现 Web 服务的优雅停机 (Graceful Shutdown)。
+///
+/// 注册对 `SIGINT` (Ctrl+C) 和 `SIGTERM` 的系统底层监听。接收到信号后，
+/// 会通知 Axum 拒绝新连接，并在退出前等待既有请求的任务安全释放。
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
