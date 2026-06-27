@@ -17,6 +17,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// 工作流节点自动注册宏。
 ///
@@ -120,6 +121,7 @@ impl GraphBuilder {
         debug: bool,
         run_timestamp: &str,
         initial_payload: &str,
+        approval_tx: broadcast::Sender<char>,
     ) -> Result<WorkflowExecutor> {
         let content = fs::read_to_string(path)?;
         let config: WorkflowConfig = serde_yaml::from_str(&content)?;
@@ -187,11 +189,10 @@ impl GraphBuilder {
                     keyword: nc.keyword.clone().unwrap_or_else(|| "ERROR".to_string())
                 },
                 "Approval" => {
-                    let (_dummy_tx, rx) = tokio::sync::broadcast::channel(16);
                     ApprovalNode {
                         id: nc.id.clone(),
                         message: nc.message.clone().unwrap_or_else(|| "请求人工审批".to_string()),
-                        rx,
+                        rx: approval_tx.subscribe(),
                     }
                 },
                 "ReActAgent" => {
