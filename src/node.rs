@@ -325,7 +325,7 @@ impl ExecutableNode for ShellNode {
         };
 
         // 如果自身 command 为空，就把大模型传入的 input 当作命令！
-        let mut target_cmd = if self.command.trim().is_empty() {
+        let target_cmd = if self.command.trim().is_empty() {
             input.trim().to_string()
         } else {
             self.command.clone()
