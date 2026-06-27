@@ -1096,17 +1096,17 @@ impl ExecutableNode for ApprovalNode {
         &self.id
     }
     fn name(&self) -> &str {
-        "✋ 人工审批"
+        "人工审批决策网关"
     }
 
-    async fn execute(&self, _input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
+    async fn execute(&self, input: &str, _debug: bool, _timestamp: &str) -> Result<String> {
         let mut rx = self.rx.resubscribe();
         loop {
             if let Ok(key) = rx.recv().await {
                 if key == 'y' {
-                    return Ok("审批通过：允许执行危险操作".to_string());
+                    return Ok(input.to_string());
                 } else if key == 'n' {
-                    anyhow::bail!("人工驳回了该操作！流程终止。");
+                    anyhow::bail!("特权阻断：指令操作已被鉴权终端显式取消拦截。");
                 }
             }
         }
