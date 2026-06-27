@@ -1,3 +1,9 @@
+//! # 工作流图拓扑构建模块 (Graph Topology Builder)
+//!
+//! 本模块负责将外部的声明式工作流配置（如 YAML 文件）解析并转换为
+//! 内存中可执行的有向无环图 (DAG) 结构。核心功能包括工作流解析、
+//! 节点实例注入、边的依赖映射，以及基于三色标记法的严格环路检测机制。
+
 // src/graph.rs
 use crate::error::WorkflowError;
 use crate::executor::WorkflowExecutor;
@@ -12,98 +18,103 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 
-// 核心元编程宏 (Macro Rules)
 /// 工作流节点自动注册宏。
 ///
 /// 利用 Rust 编译期的 AST 展开能力，消除工厂模式中冗余的 `Arc::new`
-/// 和底层的错误路由代码。不仅大幅提升了代码的声明式美感，更实现了零成本抽象。
+/// 分配语句和底层的错误路由代码。通过声明式的语法实现节点映射，
+/// 达到提升代码可读性与零成本抽象的目的。
 macro_rules! register_nodes {
     ($nc:expr, $engine:expr, { $( $name:pat => $node_expr:expr ),* $(,)? }) => {
         let node: Arc<dyn ExecutableNode> = match $nc.node_type.as_str() {
-            // 编译期循环展开：自动为所有节点包裹 Arc 智能指针
+            // 编译期循环展开：自动为所有节点装箱包裹 Arc 智能指针
             $( $name => Arc::new($node_expr), )*
 
-            // 兜底路由：拦截未注册节点并抛出强类型领域错误
+            // 兜底路由：拦截配置中未注册的非法节点类型并抛出强类型领域错误
             _ => return Err(WorkflowError::UnknownNodeType($nc.node_type.clone()).into()),
         };
         $engine.add_node(node);
     };
 }
 
-/// 顶层工作流配置结构体，与外部的 YAML 配置文件一一映射。
+/// 顶层工作流配置结构体，与外部的 YAML 配置文件根节点严格映射。
 #[derive(Deserialize, Debug)]
 pub struct WorkflowConfig {
-    /// 工作流中所有节点的定义集合
+    /// 工作流中所有执行节点的声明集合。
     pub nodes: Vec<NodeConfig>,
-    /// 定义节点间数据与控制流向的边集合
+    /// 定义节点间数据传递与控制流向的有向边集合。
     pub edges: Vec<EdgeConfig>,
 }
 
-/// 单个执行节点的声明式配置。
+/// 单个执行节点的声明式配置结构。
 ///
-/// 采用了 Option 包装的可选字段设计，以便兼容底层各异的节点类型
-/// （例如爬虫节点特有的 `link_selector`，大模型节点特有的 `prompt`）。
+/// 采用了 `Option` 包装的可选字段设计，以便在反序列化时兼容底层不同类型的节点
+/// 所特有的参数需求（例如爬虫节点特有的 `link_selector`，或大语言模型节点特有的 `prompt`）。
 #[derive(Deserialize, Debug)]
 pub struct NodeConfig {
-    /// 节点的全局唯一标识符
+    /// 节点在 DAG 拓扑中的全局唯一标识符 (ID)。
     pub id: String,
-    /// 节点类型的枚举映射字符串（如 "DeepSeek", "Spider"）
+    /// 节点类型的枚举映射字符串（如 "DeepSeek", "Spider"）。
     pub node_type: String,
 
     // --- 以下为多态节点特有可选字段 ---
-    /// 提供给 LLM 节点使用的系统级提示词
+    /// 提供给 LLM 节点使用的系统级提示词 (System Prompt)。
     pub prompt: Option<String>,
-    /// 提供给检索引擎专用的强特征 Query 搜索词
+    /// 提供给检索引擎或向量数据库使用的特征搜索词 (Query)。
     pub query: Option<String>,
-    /// 本地文件读写节点所需的目标路径
+    /// 本地文件读写节点所需的操作目标路径。
     pub file_path: Option<String>,
-    /// 正则清洗节点所需的正则表达式匹配模式
+    /// 正则清洗节点所需的正则表达式提取模式。
     pub pattern: Option<String>,
-    /// 爬虫节点所需的并发页面抓取上限
+    /// 爬虫节点所需的并发页面抓取数量上限。
     pub max_pages: Option<usize>,
-    /// 文本节点所需的静态注入内容
+    /// 文本节点所需的静态常量注入内容。
     pub text: Option<String>,
-    /// 爬虫节点用于定位子页面链接的 CSS 选择器
+    /// 爬虫节点用于定位子页面链接的底层 CSS 选择器。
     pub link_selector: Option<String>,
-    /// 搜索引擎节点返回的高质量网页数量上限
+    /// 搜索引擎节点返回的高质量网页条目上限。
     pub num_results: Option<usize>,
-    /// 向量检索召回数
+    /// 向量检索系统召回的 Top-K 匹配数量。
     pub top_k: Option<usize>,
-    /// Shell 命令
+    /// 系统终端执行节点所需的 Shell 指令字符串。
     pub command: Option<String>,
-    /// 路由判断词
+    /// 条件路由判断节点使用的命中关键字。
     pub keyword: Option<String>,
-    /// 用于审批节点
+    /// 人工审批节点在前端视图展示的提示信息。
     pub message: Option<String>,
 }
 
 /// DAG 图中的有向边定义，表示数据与控制权的流向。
 #[derive(Deserialize, Debug)]
 pub struct EdgeConfig {
-    /// 边的起点节点 ID (上游)
+    /// 边的起点节点 ID (上游发出方)。
     pub from: String,
-    /// 边的终点节点 ID (下游)
+    /// 边的终点节点 ID (下游接收方)。
     pub to: String,
+    /// 可选的条件网关标识符。当存在时，边仅在特定条件匹配时激活。
     pub condition: Option<String>,
 }
 
-/// 图拓扑构建器，负责将静态的 YAML 描述转化为可执行的内存模型。
+/// 图拓扑构建器工厂，负责将静态的 YAML 配置反序列化并转化为内存中的执行模型。
 pub struct GraphBuilder;
 
 impl GraphBuilder {
-    /// 从指定的 YAML 文件读取配置，并构建出安全的并发执行引擎。
+    /// 从指定的 YAML 配置文件读取配置，并构建出并发安全的执行引擎。
     ///
-    /// 此函数包含了核心的生命周期管理与安全校验，在将节点注入引擎前，
-    /// 必须先通过严格的 DAG 环路检测算法。
+    /// 在将所有节点和边组装并注入底层调度引擎前，该方法会强制执行
+    /// 严格的 DAG 环路检测，以防止执行时出现无限死循环。
     ///
     /// # Arguments
-    /// * `path` - YAML 配置文件的物理路径
-    /// * `debug` - 是否开启底层开发调试模式（日志落盘）
+    ///
+    /// * `path` - YAML 配置文件的物理路径。
+    /// * `debug` - 是否开启底层开发调试模式（开启后会输出落盘日志）。
+    /// * `run_timestamp` - 全局执行流水号（时间戳），用于追踪产物与日志。
+    /// * `initial_payload` - 初始化注入 DAG 网络的首包数据。
     ///
     /// # Errors
-    /// * 如果 YAML 格式损坏，返回 `ParseYamlError`
-    /// * 如果检测到循环依赖，返回 `CycleDetected`
-    /// * 如果存在未注册节点，返回 `UnknownNodeType`
+    ///
+    /// * 若指定的文件路径无法读取或 YAML 语法损坏，返回 I/O 或序列化相关错误。
+    /// * 若检测到拓扑图中存在反向依赖（死循环），返回 `WorkflowError::CycleDetected`。
+    /// * 若配置文件中声明了引擎尚未实现的组件，返回 `WorkflowError::UnknownNodeType`。
     pub fn build_from_yaml(
         path: &str,
         debug: bool,
@@ -113,17 +124,17 @@ impl GraphBuilder {
         let content = fs::read_to_string(path)?;
         let config: WorkflowConfig = serde_yaml::from_str(&content)?;
 
-        // 满分考点：在构建前，必须进行有向无环图(DAG)的环路检测！
+        // 核心安全校验：在装配节点前，必须对有向无环图 (DAG) 进行严格的环路检测。
         Self::check_cycles(&config)?;
 
-        // ✨ 透传给 Executor
+        // 初始化底层并发执行调度器，透传运行时上下文
         let mut engine = WorkflowExecutor::new(
             debug,
             run_timestamp.to_string(),
             initial_payload.to_string(),
         );
 
-        // 实例化节点 (利用自定义宏，代码极致压缩与优雅)
+        // 实例化并装配节点模型（利用工厂宏保持分支简洁）
         for nc in &config.nodes {
             register_nodes!(nc, engine, {
                 "DeepSeek" => DeepSeekNode {
@@ -186,7 +197,7 @@ impl GraphBuilder {
                 "ReActAgent" => {
                     let mut tools = HashMap::new();
 
-                    // 1. 🕷️ 爬虫工具
+                    // 1. 爬虫工具
                     tools.insert("spider".to_string(), NodeToolWrapper {
                         description: "并发网页抓取爬虫。必须提供合法的完整 URL 作为输入。".to_string(),
                         node: Arc::new(SpiderNode {
@@ -196,7 +207,7 @@ impl GraphBuilder {
                         }),
                     });
 
-                    // 2. 💻 Shell 工具
+                    // 2. Shell 终端工具
                     tools.insert("shell".to_string(), NodeToolWrapper {
                         description: "执行本地终端系统命令。参数应为纯合法的 shell 指令字符串。".to_string(),
                         node: Arc::new(ShellNode {
@@ -205,7 +216,7 @@ impl GraphBuilder {
                         }),
                     });
 
-                    // 3. 🌐 智能搜索工具 (Agent 的神兵利器)
+                    // 3. 智能搜索工具
                     tools.insert("search".to_string(), NodeToolWrapper {
                         description: "全网智能搜索引擎，用于查询最新资讯和客观事实。参数应为你要搜索的关键词。".to_string(),
                         node: Arc::new(WebSearchNode {
@@ -216,7 +227,7 @@ impl GraphBuilder {
                         }),
                     });
 
-                    // 4. 📄 多模态文件解析工具 (视觉/听觉/文档)
+                    // 4. 多模态文件解析工具 (视觉/听觉/文档)
                     tools.insert("parse_file".to_string(), NodeToolWrapper {
                         description: "多模态解析器，可以读取并提取本地 PDF, Word, 图片(OCR) 和 音频(语音识别) 文件中的文本。参数必须是本地文件的绝对或相对路径。".to_string(),
                         node: Arc::new(MultiModalParseNode {
@@ -225,7 +236,7 @@ impl GraphBuilder {
                         }),
                     });
 
-                    // 5. 💾 文件写入工具 (让大模型拥有“记忆”和“产出”能力)
+                    // 5. 文件写入工具 (赋予大模型持久化输出能力)
                     tools.insert("write_file".to_string(), NodeToolWrapper {
                         description: "将一段文本保存到本地系统。参数应为你想要写入的具体文本内容。".to_string(),
                         node: Arc::new(FileWriteNode {
@@ -244,21 +255,27 @@ impl GraphBuilder {
             });
         }
 
-        // 添加边
+        // 装配有向边（依赖关系）
         for ec in &config.edges {
             engine.add_edge(&ec.from, &ec.to, ec.condition.clone());
         }
 
-        // 构建完成后，预计算好拓扑顺序
+        // 触发调度器的图拓扑解析排序，计算入度以准备并发调度
         engine.calculate_topology()?;
 
         Ok(engine)
     }
 
-    /// 基于深度优先搜索（DFS）的三色标记法进行图的环路检测。
+    /// 基于深度优先搜索（DFS）的三色标记法进行图环路检测。
     ///
-    /// 遍历所有声明的边节点，将状态分为：0(未访问), 1(正在递归栈中), 2(已安全访问)。
-    /// 如果在遍历过程中遇到状态为 1 的节点，则证明拓扑图中存在反向指针(死循环)。
+    /// # 工作原理
+    /// 维护一张全局哈希表来记录每个节点的状态：
+    /// * `0` (White): 未被访问。
+    /// * `1` (Gray) : 正在当前 DFS 递归调用栈中被访问。
+    /// * `2` (Black): 该节点及其所有子分支均已安全完成访问。
+    ///
+    /// 当向下递归搜索邻接节点时，如果遇到状态为 `1` 的节点，则证明拓扑图中存在
+    /// 指向当前递归栈上游的反向指针，即检测到了死循环 (Cycle)。
     fn check_cycles(config: &WorkflowConfig) -> Result<()> {
         let mut adj: HashMap<String, Vec<String>> = HashMap::new();
         for edge in &config.edges {
@@ -283,34 +300,36 @@ impl GraphBuilder {
         Ok(())
     }
 
-    /// DFS 递归遍历核心逻辑。
+    /// 执行单节点的 DFS 拓扑环路校验递归。
     fn dfs_has_cycle(
         curr: &str,
         adj: &HashMap<String, Vec<String>>,
         state: &mut HashMap<String, u8>,
     ) -> bool {
+        // 标记为正在访问（入栈）
         state.insert(curr.to_string(), 1);
 
         if let Some(neighbors) = adj.get(curr) {
             for next in neighbors {
                 let s = *state.get(next).unwrap_or(&0);
                 if s == 1 || (s == 0 && Self::dfs_has_cycle(next, adj, state)) {
-                    return true;
+                    return true; // 检测到回边闭环
                 }
             }
         }
 
+        // 标记为安全结束（出栈）
         state.insert(curr.to_string(), 2);
         false
     }
 }
 
-// 🧪 单元测试层
+// 单元测试模块
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // 辅助函数：快速生成一个占位的 NodeConfig
+    /// 辅助构造函数：快速生成用于网络拓扑测试的占位节点配置。
     fn mock_node_config(id: &str) -> NodeConfig {
         NodeConfig {
             id: id.to_string(),
@@ -376,6 +395,7 @@ mod tests {
                     condition: None,
                 },
                 EdgeConfig {
+                    // 构建死循环回路: C -> A
                     from: "C".to_string(),
                     to: "A".to_string(),
                     condition: None,
@@ -390,7 +410,7 @@ mod tests {
             let err_str = e.to_string();
             assert!(
                 err_str.contains("死循环") || err_str.contains("CycleDetected"),
-                "抛出的错误信息必须包含我们定义的强类型描述"
+                "抛出的系统错误信息必须包含定义的强类型异常描述"
             );
         }
     }
